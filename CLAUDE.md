@@ -2,31 +2,39 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Kondisi saat ini
-
-Belum ada kode. Repo hanya berisi `context.md` (berbahasa Indonesia), ringkasan diskusi dari claude.ai yang menjadi satu-satunya sumber tujuan proyek. Belum ada source code, build system, test suite, maupun riwayat git, jadi belum ada perintah build/lint/test yang bisa didokumentasikan. Perbarui file ini setelah toolchain tersedia.
-
 ## Tujuan proyek
 
-Tool yang membaca **hanya footer metadata Apache Parquet** (tanpa scan data baris) untuk menghasilkan laporan kesehatan dataset. Arah yang dipilih adalah gabungan dari:
+`pqlint` adalah linter Parquet yang membaca **hanya footer metadata** (tanpa scan data baris) dan menghasilkan skor 0–100 plus temuan beserta rekomendasi. Konteks dan daftar ide lain ada di `context.md` (berbahasa Indonesia). Rencana berikutnya: catalog scanner object store (S3/GCS) yang membaca footer lewat range request, lalu agregasi ke laporan level dataset. Proyek referensi: [vutrinh274/petquar](https://github.com/vutrinh274/petquar) (tidak ada kode yang disalin darinya).
 
-- **Parquet linter / health check**: deteksi small files, row group terlalu kecil/besar, kolom tanpa stats, dictionary encoding fallback, kolom yang sebaiknya disort; output berupa skor plus rekomendasi.
-- **Catalog scanner object store**: scan sebuah prefix, baca footer tiap file lewat range request di byte terakhir, lalu agregasi menjadi laporan level dataset (jumlah file, total baris, sebaran ukuran, kardinalitas kolom partisi).
+## Perintah
 
-Relevan dengan pekerjaan migrasi data warehouse user. Ide lain dari metadata yang sama (predicate pushdown simulator, estimator biaya/ukuran, schema diff, analyzer clustering/sort, perbandingan writer lewat `created_by`, data quality dari stats) tercatat di `context.md` tetapi bukan cakupan yang dipilih.
+Toolchain: `uv` + `pyarrow` (Python >=3.11), build backend `uv_build`.
 
-## Proyek referensi
+```
+uv sync                                   # install dependensi (termasuk dev)
+uv run pytest -q                          # semua tes
+uv run pytest tests/test_rules.py::test_uncompressed   # satu tes
+uv run pqlint <file-atau-folder> [--json] [--fail-under N]
+```
 
-[vutrinh274/petquar](https://github.com/vutrinh274/petquar) adalah inspirasinya: extension Rust (PyO3 membungkus crate `parquet` dari arrow-rs) dengan backend FastAPI, frontend statis, dan build `uv` + `maturin`. Statusnya masih early scaffold, hanya mendukung file lokal, dengan stub S3 di `reader.py`. Proyek ini bisa berkontribusi ke petquar atau meminjam pendekatannya, tetapi tidak ada kode di sini yang berasal dari petquar.
+Exit code CLI: 0 normal, 1 jika ada skor di bawah `--fail-under`, 2 jika ada file yang gagal dibaca atau tidak ada file ditemukan.
 
-## Urutan implementasi yang direncanakan
+## Arsitektur
 
-1. Prototipe Python yang membaca footer satu file dengan `pyarrow.parquet.ParquetFile(...).metadata`.
-2. Aturan linter (ukuran row group, stats hilang, small file, dll) beserta laporannya.
-3. Perluas ke S3: baca footer lewat range request (`s3fs`/`fsspec` atau `boto3`), loop semua file dalam prefix.
-4. Agregasi ke laporan level dataset (tabel/JSON, opsional UI di tahap berikutnya).
+Alur: `cli` → `report.lint_path` → `reader.read_local` → `rules.lint`.
 
-## Keputusan yang masih terbuka (belum diputuskan; tanyakan ke user sebelum berasumsi)
+- `reader.FileInfo(path, size, metadata)` adalah batas antara pembacaan dan aturan. Ukuran file dibawa terpisah karena footer tidak memuatnya. Aturan hanya bergantung pada `FileInfo`, jadi reader S3/GCS nanti cukup menghasilkan `FileInfo` yang sama (range request untuk footer + HEAD untuk ukuran) tanpa mengubah aturan.
+- `rules.py`: tiap aturan adalah generator `(FileInfo, Config) -> Finding`. Menambah aturan = tulis fungsi lalu daftarkan di `DEFAULT_RULES`. Semua ambang dan bobot penalti ada di `Config`. Temuan diagregasi per file (satu temuan per aturan dengan daftar kolom), bukan per row group, supaya laporan tidak berisik. Skor = 100 dikurangi penalti per temuan (warning 10, info 3), minimum 0.
+- `report.lint_path` menangkap kegagalan baca ke `FileReport.error` alih-alih melempar, sehingga satu file rusak tidak menghentikan scan folder.
 
-- `pyarrow` (cepat dibuat) vs Rust/PyO3 (seperti petquar).
-- Object store: S3 vs GCS (konteks BigQuery/GCS belum dikonfirmasi).
+## Hal yang tidak jelas dari kode
+
+- `row_group.total_byte_size` di Parquet adalah ukuran **tidak terkompresi**; ambang row group dibandingkan dengan nilai itu.
+- Row group terakhir tidak dinilai oleh `row-group-small` (sisa wajar), dan file dengan satu row group yang sudah kena `small-file` tidak dilaporkan dua kali.
+- `dictionary-ineffective` adalah heuristik: footer tidak bisa membedakan fallback ke PLAIN (`encodings` sama persis dengan kolom yang tidak fallback). Dipakai ukuran halaman dictionary on-disk >= 1 MiB; heuristik rasio sudah dicoba dan membuang kolom unik biasa seperti id, jadi jangan dikembalikan.
+- Tes memperkecil ambang lewat `Config` agar file fixture tetap kecil; hanya tes dictionary yang menulis ~2 MB tanpa kompresi.
+
+## Keputusan yang masih terbuka (tanyakan ke user sebelum berasumsi)
+
+- Rust/PyO3 (seperti petquar) vs tetap `pyarrow` jika performa jadi masalah.
+- Object store: S3 vs GCS.
