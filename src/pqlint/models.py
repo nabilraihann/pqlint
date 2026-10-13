@@ -5,6 +5,7 @@ from enum import Enum
 
 
 class Severity(str, Enum):
+    HINT = "hint"  # a suggestion, not a defect: never lowers the score
     INFO = "info"
     WARNING = "warning"
 
@@ -16,6 +17,8 @@ class Finding:
     message: str
     recommendation: str
     columns: tuple[str, ...] = ()
+    # Optional per-column numbers, e.g. overlap fraction for sort-candidates
+    details: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

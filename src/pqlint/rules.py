@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
@@ -17,6 +18,10 @@ class Config:
     row_group_max_bytes: int = 1024 * MiB
     # Default dictionary page limit of the common writers is 1 MiB.
     dictionary_page_limit_bytes: int = 1 * MiB
+    # Sort suggestions: need a few row groups for overlap to mean anything.
+    sort_min_row_groups: int = 4
+    sort_overlap_threshold: float = 0.5
+    sort_max_suggestions: int = 5
     warning_penalty: int = 10
     info_penalty: int = 3
 
@@ -174,6 +179,78 @@ def all_null_column(info: FileInfo, cfg: Config) -> Iterator[Finding]:
         )
 
 
+def _overlap(ranges: list[tuple]) -> float:
+    """How much row group min/max ranges overlap: 0 = disjoint (clustered), 1 = all alike.
+
+    For each row group, count the row groups whose range contains its min
+    (itself included). With n groups the mean count runs from 1 to n; rescale
+    that to 0..1. Rank-based, so it works for strings and dates, not only numbers.
+    """
+    n = len(ranges)
+    mins = sorted(lo for lo, _ in ranges)
+    maxs = sorted(hi for _, hi in ranges)
+    depth = sum(bisect_right(mins, lo) - bisect_left(maxs, lo) for lo, _ in ranges)
+    return (depth / n - 1) / (n - 1)
+
+
+def _is_nan(v: object) -> bool:
+    return isinstance(v, float) and v != v
+
+
+def sort_candidates(info: FileInfo, cfg: Config) -> Iterator[Finding]:
+    """Suggest columns whose row group ranges overlap heavily.
+
+    Footer stats show how values are spread across row groups, not which
+    columns queries filter on, so this is a ranked list of candidates only.
+    """
+    md = info.metadata
+    if md.num_rows == 0 or md.num_row_groups < cfg.sort_min_row_groups:
+        return
+    skip = {md.schema.column(i).path for i in range(len(md.schema))
+            if md.schema.column(i).max_repetition_level > 0}
+    skip |= _null_typed(info)
+    if md.num_row_groups:
+        skip |= {md.schema.column(sc.column_index).path
+                 for sc in md.row_group(0).sorting_columns}
+
+    ranges: dict[str, list[tuple] | None] = {}
+    for _, name, c in _chunks(info):
+        if name in skip or c.physical_type == "BOOLEAN":
+            continue
+        st = c.statistics if c.is_stats_set else None
+        if st is None or not st.has_min_max or _is_nan(st.min) or _is_nan(st.max):
+            ranges[name] = None  # a gap in stats makes the column unjudgeable
+        elif ranges.get(name, []) is not None:
+            ranges.setdefault(name, []).append((st.min, st.max))
+
+    scored = []
+    for name, rs in ranges.items():
+        if rs is None or len(rs) < cfg.sort_min_row_groups:
+            continue
+        if all(lo == hi == rs[0][0] for lo, hi in rs):
+            continue  # one constant value: nothing to gain from sorting
+        try:
+            score = _overlap(rs)
+        except TypeError:  # values that cannot be ordered against each other
+            continue
+        if score >= cfg.sort_overlap_threshold:
+            scored.append((score, name))
+    if not scored:
+        return
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    top = scored[: cfg.sort_max_suggestions]
+    yield Finding(
+        "sort-candidates",
+        Severity.HINT,
+        f"Row group min/max ranges overlap heavily in {len(top)} column(s), "
+        "most overlapping first.",
+        "Sort or cluster the data by the column(s) you filter on most; engines can then "
+        "skip row groups. Footer stats cannot tell which column that is.",
+        tuple(n for _, n in top),
+        {n: round(s, 3) for s, n in top},
+    )
+
+
 DEFAULT_RULES: tuple[Rule, ...] = (
     small_file,
     row_group_size,
@@ -181,14 +258,17 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     uncompressed,
     dictionary_ineffective,
     all_null_column,
+    sort_candidates,
 )
 
 
 def lint(info: FileInfo, cfg: Config = Config(), rules: tuple[Rule, ...] = DEFAULT_RULES):
     """Run the rules and return (findings, score)."""
     findings = [f for rule in rules for f in rule(info, cfg)]
-    penalty = sum(
-        cfg.warning_penalty if f.severity is Severity.WARNING else cfg.info_penalty
-        for f in findings
-    )
+    weights = {
+        Severity.WARNING: cfg.warning_penalty,
+        Severity.INFO: cfg.info_penalty,
+        Severity.HINT: 0,
+    }
+    penalty = sum(weights[f.severity] for f in findings)
     return findings, max(0, 100 - penalty)

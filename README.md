@@ -27,6 +27,15 @@ be read or no Parquet files were found.
 | `uncompressed` | warning | column stored without a compression codec |
 | `dictionary-ineffective` | info | dictionary page of 1 MiB or more (heuristic) |
 | `all-null-column` | info | column contains only nulls |
+| `sort-candidates` | hint | columns whose row group min/max ranges overlap heavily (see below); never lowers the score |
+
+`sort-candidates` ranks columns by how much their per-row-group min/max ranges overlap
+(0% = row groups hold disjoint ranges, so engines can skip them; 100% = every row group
+spans the same range, so filters skip nothing). A high percentage means sorting or clustering
+by that column would help *if queries filter on it*; the footer cannot know that, so treat the
+list as candidates. Skipped: columns without stats in every row group, constant and boolean
+columns, list columns, columns already declared sorted in the footer, and files with fewer
+than 4 row groups.
 
 Thresholds live in `pqlint.Config`.
 

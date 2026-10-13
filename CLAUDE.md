@@ -34,6 +34,8 @@ Alur: `cli` → `report.lint_path` → `reader.read_local` → `rules.lint`; set
 - Row group terakhir tidak dinilai oleh `row-group-small` (sisa wajar), dan file dengan satu row group yang sudah kena `small-file` tidak dilaporkan dua kali.
 - `dictionary-ineffective` adalah heuristik: footer tidak bisa membedakan fallback ke PLAIN (`encodings` sama persis dengan kolom yang tidak fallback). Dipakai ukuran halaman dictionary on-disk >= 1 MiB; heuristik rasio sudah dicoba dan membuang kolom unik biasa seperti id, jadi jangan dikembalikan.
 - Kolom bertipe logical `Null` (pandas/pyarrow menulisnya untuk kolom yang isinya None semua) tidak pernah punya stats; ditangani khusus: dilaporkan sebagai `all-null-column`, bukan `missing-stats`. Kolom di bawah repeated field (list) dilewati oleh `all-null-column` karena list kosong dihitung sebagai null di leaf.
+- `sort-candidates` memakai `Severity.HINT` (penalti 0: saran, bukan cacat) dan `Finding.details` untuk angka per kolom. Metrik `_overlap` berbasis peringkat (bisect pada min/max terurut), jadi berlaku untuk string/tanggal, bukan hanya angka: 0 = rentang antar row group terpisah, 1 = semuanya sama. Footer tidak tahu kolom mana yang sering difilter, jadi hasilnya hanya kandidat. pyarrow tidak memasukkan NaN ke min/max.
+- `*.parquet` ada di `.gitignore` agar dataset yang dites di folder repo tidak ikut ter-commit.
 - Tes memperkecil ambang lewat `Config` agar file fixture tetap kecil; hanya tes dictionary yang menulis ~2 MB tanpa kompresi.
 
 ## Keputusan yang masih terbuka (tanyakan ke user sebelum berasumsi)

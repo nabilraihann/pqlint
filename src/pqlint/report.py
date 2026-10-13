@@ -74,7 +74,10 @@ def to_text(reports: list[FileReport], summary_only: bool = False) -> str:
             f"({r.num_rows} rows, {r.num_row_groups} row groups, {r.size} bytes)"
         )
         for f in r.findings:
-            cols = f" [{', '.join(f.columns)}]" if f.columns else ""
+            if f.details:
+                cols = " [" + ", ".join(f"{c} {v:.0%}" for c, v in f.details.items()) + "]"
+            else:
+                cols = f" [{', '.join(f.columns)}]" if f.columns else ""
             lines.append(f"  {f.severity.value.upper():7} {f.rule}: {f.message}{cols}")
             lines.append(f"          -> {f.recommendation}")
         if not r.findings:
