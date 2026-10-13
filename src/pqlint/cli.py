@@ -2,23 +2,21 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Iterator
-from pathlib import Path
 
+from .reader import expand_paths
 from .report import lint_path, to_json, to_text
 
 
-def _expand(paths: list[str]) -> Iterator[Path]:
-    for p in map(Path, paths):
-        if p.is_dir():
-            yield from sorted(p.rglob("*.parquet"))
-        else:
-            yield p
-
-
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "compact":
+        from .compact_cli import main as compact_main
+
+        return compact_main(argv[1:])
     parser = argparse.ArgumentParser(
-        prog="pqlint", description="Lint Parquet files using only their footer metadata."
+        prog="pqlint",
+        description="Lint Parquet files using only their footer metadata.",
+        epilog="To rewrite files with larger row groups and an optional sort: pqlint compact --help",
     )
     parser.add_argument("paths", nargs="+", help="Parquet files or directories")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
@@ -35,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    reports = [lint_path(p) for p in _expand(args.paths)]
+    reports = [lint_path(p) for p in expand_paths(args.paths)]
     if not reports:
         print("pqlint: no parquet files found", file=sys.stderr)
         return 2

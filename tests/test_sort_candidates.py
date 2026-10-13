@@ -134,3 +134,19 @@ def test_hint_does_not_lower_score(make):
 def test_empty_file(make):
     f, _ = sort_finding(make({"x": pa.array([], type=pa.int64())}))
     assert f is None
+
+
+def test_overlap_full_span_ranges_score_one():
+    # Every group spans nearly everything but starts at a different point: the
+    # earlier endpoint-depth metric scored this ~0.5.
+    ranges = [(i, 1000 + i) for i in range(10)]
+    assert _overlap(ranges) == 1
+
+
+def test_overlap_counts_pairs():
+    # Three ranges, only the first two intersect: 1 of 3 pairs.
+    assert _overlap([(0, 10), (5, 15), (20, 30)]) == pytest.approx(1 / 3)
+
+
+def test_overlap_touching_ranges_count_as_overlapping():
+    assert _overlap([(0, 5), (5, 10)]) == 1

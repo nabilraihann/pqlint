@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
@@ -16,6 +16,9 @@ class Config:
     # Parquet's row group total_byte_size is the uncompressed size.
     row_group_min_bytes: int = 32 * MiB
     row_group_max_bytes: int = 1024 * MiB
+    # A row group is only "small" if it is also short: narrow, repetitive data
+    # encodes to few bytes even with millions of rows.
+    row_group_min_rows: int = 1_000_000
     # Default dictionary page limit of the common writers is 1 MiB.
     dictionary_page_limit_bytes: int = 1 * MiB
     # Sort suggestions: need a few row groups for overlap to mean anything.
@@ -64,18 +67,23 @@ def small_file(info: FileInfo, cfg: Config) -> Iterator[Finding]:
 
 def row_group_size(info: FileInfo, cfg: Config) -> Iterator[Finding]:
     md = info.metadata
-    sizes = [md.row_group(i).total_byte_size for i in range(md.num_row_groups)]
+    groups = [md.row_group(i) for i in range(md.num_row_groups)]
+    sizes = [g.total_byte_size for g in groups]
     # The last row group is naturally the remainder, and a lone row group of a
     # small file is already covered by small-file.
-    judged = sizes[:-1] if len(sizes) > 1 else ([] if _is_small(info, cfg) else sizes)
-    small = [s for s in judged if s < cfg.row_group_min_bytes]
+    judged = groups[:-1] if len(groups) > 1 else ([] if _is_small(info, cfg) else groups)
+    small = [
+        g.total_byte_size
+        for g in judged
+        if g.total_byte_size < cfg.row_group_min_bytes and g.num_rows < cfg.row_group_min_rows
+    ]
     if small:
         yield Finding(
             "row-group-small",
             Severity.WARNING,
-            f"{len(small)} of {len(sizes)} row groups are under "
-            f"{cfg.row_group_min_bytes / MiB:.0f} MiB uncompressed "
-            f"(smallest {min(small) / MiB:.2f} MiB).",
+            f"{len(small)} of {len(groups)} row groups are under "
+            f"{cfg.row_group_min_bytes / MiB:.0f} MiB uncompressed and "
+            f"{cfg.row_group_min_rows:,} rows (smallest {min(small) / MiB:.2f} MiB).",
             "Raise the writer's row group size; tiny row groups weaken compression and stats.",
         )
     large = [s for s in sizes if s > cfg.row_group_max_bytes]
@@ -83,7 +91,7 @@ def row_group_size(info: FileInfo, cfg: Config) -> Iterator[Finding]:
         yield Finding(
             "row-group-large",
             Severity.WARNING,
-            f"{len(large)} of {len(sizes)} row groups exceed "
+            f"{len(large)} of {len(groups)} row groups exceed "
             f"{cfg.row_group_max_bytes / MiB:.0f} MiB uncompressed "
             f"(largest {max(large) / MiB:.0f} MiB).",
             "Lower the row group size; huge row groups need a lot of memory and limit parallelism.",
@@ -180,17 +188,18 @@ def all_null_column(info: FileInfo, cfg: Config) -> Iterator[Finding]:
 
 
 def _overlap(ranges: list[tuple]) -> float:
-    """How much row group min/max ranges overlap: 0 = disjoint (clustered), 1 = all alike.
+    """Fraction of row group pairs whose min/max ranges intersect.
 
-    For each row group, count the row groups whose range contains its min
-    (itself included). With n groups the mean count runs from 1 to n; rescale
-    that to 0..1. Rank-based, so it works for strings and dates, not only numbers.
+    0 = all ranges disjoint (clustered), 1 = every pair overlaps. Counts the
+    disjoint pairs instead: j is disjoint from every range whose max lies
+    below j's min, found by bisecting the sorted maxima. Rank-based, so it
+    works for strings and dates, not only numbers. Ranges that merely touch
+    at a shared value still count as overlapping.
     """
     n = len(ranges)
-    mins = sorted(lo for lo, _ in ranges)
     maxs = sorted(hi for _, hi in ranges)
-    depth = sum(bisect_right(mins, lo) - bisect_left(maxs, lo) for lo, _ in ranges)
-    return (depth / n - 1) / (n - 1)
+    disjoint = sum(bisect_left(maxs, lo) for lo, _ in ranges)
+    return 1 - disjoint / (n * (n - 1) / 2)
 
 
 def _is_nan(v: object) -> bool:

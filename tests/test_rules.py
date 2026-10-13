@@ -141,3 +141,12 @@ def test_null_typed_column_in_empty_file_is_not_flagged(write):
     t = pa.table({"n": pa.nulls(0)})
     found, _ = rules_of(write(t, compression="zstd"), NO_SIZE_RULES)
     assert found == {}
+
+
+def test_row_group_with_many_rows_is_not_small_even_if_few_bytes(write, table):
+    # 400 rows per group is "few bytes" here; lowering the row threshold below
+    # that must clear the finding.
+    path = write(table, compression="zstd", row_group_size=400)
+    base = dict(small_file_bytes=0, row_group_min_bytes=10**9)
+    assert "row-group-small" in rules_of(path, Config(**base))[0]
+    assert "row-group-small" not in rules_of(path, Config(**base, row_group_min_rows=100))[0]
