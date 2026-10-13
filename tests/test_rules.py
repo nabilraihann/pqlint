@@ -108,3 +108,21 @@ def test_score_never_below_zero():
 
     _, score = lint(Stub(), rules=(noisy,))
     assert score == 0
+
+
+def test_empty_file_is_not_flagged_for_missing_stats(write):
+    t = pa.table({"a": pa.array([], type=pa.int64())})
+    found, _ = rules_of(write(t, compression="zstd"), NO_SIZE_RULES)
+    assert "missing-stats" not in found
+
+
+def test_list_column_of_empty_lists_is_not_all_null(write):
+    t = pa.table({"l": pa.array([[], [], []], type=pa.list_(pa.int64()))})
+    found, _ = rules_of(write(t, compression="zstd"), NO_SIZE_RULES)
+    assert "all-null-column" not in found
+
+
+def test_nested_struct_leaf_that_is_all_null_is_flagged(write):
+    t = pa.table({"s": pa.array([None, None], type=pa.struct([("x", pa.int64())]))})
+    found, _ = rules_of(write(t, compression="zstd"), NO_SIZE_RULES)
+    assert found["all-null-column"].columns == ("s.x",)

@@ -76,6 +76,8 @@ def row_group_size(info: FileInfo, cfg: Config) -> Iterator[Finding]:
 
 
 def missing_stats(info: FileInfo, cfg: Config) -> Iterator[Finding]:
+    if info.metadata.num_rows == 0:  # writers emit no stats for empty files
+        return
     cols = sorted({name for _, name, c in _chunks(info) if not c.is_stats_set})
     if cols:
         yield Finding(
@@ -130,9 +132,22 @@ def all_null_column(info: FileInfo, cfg: Config) -> Iterator[Finding]:
     md = info.metadata
     if md.num_rows == 0:
         return
+    # In repeated columns an empty list counts as a null at the leaf, so
+    # null_count == num_values does not mean the column holds no data.
+    repeated = {
+        md.schema.column(i).path
+        for i in range(len(md.schema))
+        if md.schema.column(i).max_repetition_level > 0
+    }
     seen: dict[str, bool] = {}
     for _, name, c in _chunks(info):
-        all_null = c.is_stats_set and c.statistics.null_count == c.num_values
+        if name in repeated:
+            continue
+        all_null = (
+            c.is_stats_set
+            and c.statistics.has_null_count
+            and c.statistics.null_count == c.num_values
+        )
         seen[name] = seen.get(name, True) and bool(all_null)
     cols = sorted(n for n, v in seen.items() if v)
     if cols:
