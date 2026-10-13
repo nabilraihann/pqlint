@@ -23,6 +23,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("paths", nargs="+", help="Parquet files or directories")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
     parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="print only the dataset summary, not per-file findings",
+    )
+    parser.add_argument(
         "--fail-under",
         type=int,
         metavar="N",
@@ -34,7 +39,10 @@ def main(argv: list[str] | None = None) -> int:
     if not reports:
         print("pqlint: no parquet files found", file=sys.stderr)
         return 2
-    print(to_json(reports) if args.json else to_text(reports))
+    if args.json:
+        print(to_json(reports, args.summary_only))
+    else:
+        print(to_text(reports, args.summary_only))
 
     if any(r.error for r in reports):
         return 2

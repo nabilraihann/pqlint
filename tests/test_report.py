@@ -28,4 +28,4 @@ def test_one_failing_file_does_not_stop_the_scan(write, table, tmp_path, monkeyp
     assert main([str(tmp_path)]) == 2  # error present -> exit 2
     out = capsys.readouterr().out
     assert "ERROR rule failed" in out
-    assert out.count("score") == 1  # the second file was still linted
+    assert out.count(": score ") == 1  # the second file was still linted

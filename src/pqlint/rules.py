@@ -33,6 +33,16 @@ def _chunks(info: FileInfo) -> Iterator[tuple[int, str, object]]:
             yield rg_idx, col.path_in_schema, col
 
 
+def _null_typed(info: FileInfo) -> set[str]:
+    """Columns with the Parquet Null logical type: always empty, never any stats."""
+    schema = info.metadata.schema
+    return {
+        schema.column(i).path
+        for i in range(len(schema))
+        if str(schema.column(i).logical_type) == "Null"
+    }
+
+
 def _is_small(info: FileInfo, cfg: Config) -> bool:
     return info.size < cfg.small_file_bytes
 
@@ -78,7 +88,10 @@ def row_group_size(info: FileInfo, cfg: Config) -> Iterator[Finding]:
 def missing_stats(info: FileInfo, cfg: Config) -> Iterator[Finding]:
     if info.metadata.num_rows == 0:  # writers emit no stats for empty files
         return
-    cols = sorted({name for _, name, c in _chunks(info) if not c.is_stats_set})
+    null_typed = _null_typed(info)
+    cols = sorted(
+        {n for _, n, c in _chunks(info) if not c.is_stats_set and n not in null_typed}
+    )
     if cols:
         yield Finding(
             "missing-stats",
@@ -139,9 +152,10 @@ def all_null_column(info: FileInfo, cfg: Config) -> Iterator[Finding]:
         for i in range(len(md.schema))
         if md.schema.column(i).max_repetition_level > 0
     }
+    null_typed = _null_typed(info) - repeated
     seen: dict[str, bool] = {}
     for _, name, c in _chunks(info):
-        if name in repeated:
+        if name in repeated or name in null_typed:
             continue
         all_null = (
             c.is_stats_set
@@ -149,7 +163,7 @@ def all_null_column(info: FileInfo, cfg: Config) -> Iterator[Finding]:
             and c.statistics.null_count == c.num_values
         )
         seen[name] = seen.get(name, True) and bool(all_null)
-    cols = sorted(n for n, v in seen.items() if v)
+    cols = sorted(null_typed | {n for n, v in seen.items() if v})
     if cols:
         yield Finding(
             "all-null-column",

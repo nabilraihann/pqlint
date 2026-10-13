@@ -126,3 +126,18 @@ def test_nested_struct_leaf_that_is_all_null_is_flagged(write):
     t = pa.table({"s": pa.array([None, None], type=pa.struct([("x", pa.int64())]))})
     found, _ = rules_of(write(t, compression="zstd"), NO_SIZE_RULES)
     assert found["all-null-column"].columns == ("s.x",)
+
+
+def test_null_typed_column_is_all_null_not_missing_stats(write):
+    # An all-None pandas/pyarrow column is written with the Null logical type,
+    # which never carries statistics.
+    t = pa.table({"a": [1, 2, 3], "n": pa.nulls(3)})
+    found, _ = rules_of(write(t, compression="zstd"), NO_SIZE_RULES)
+    assert found["all-null-column"].columns == ("n",)
+    assert "missing-stats" not in found
+
+
+def test_null_typed_column_in_empty_file_is_not_flagged(write):
+    t = pa.table({"n": pa.nulls(0)})
+    found, _ = rules_of(write(t, compression="zstd"), NO_SIZE_RULES)
+    assert found == {}
