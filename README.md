@@ -6,9 +6,32 @@ Lint Parquet files using only their footer metadata. No row data is read.
 uv sync
 uv run pqlint path/to/file.parquet          # a file, or a directory (recursive)
 uv run pqlint data/ --summary-only          # dataset-level summary only
+uv run pqlint data/ --details               # several files: also list every file's findings
+uv run pqlint data/ --color never           # auto (default) colors only on a terminal; honors NO_COLOR
 uv run pqlint data/ --json                  # machine-readable: {"summary": ..., "files": [...]}
 uv run pqlint data/ --fail-under 80         # exit 1 if any file scores below 80
 ```
+
+Output is plain-text tables sized to the terminal. A single file shows a header and a findings
+table (`LEVEL | RULE | FINDING`, with the affected columns and the recommendation under each
+finding):
+
+```
+asp-so-idr-df.parquet
+  Score 90/100  ·  33,646,597 rows · 673 row groups · 245.00 MiB
+  Writer parquet-cpp-arrow version 21.0.0
+
+  LEVEL    RULE             FINDING
+  ───────  ───────────────  ─────────────────────────────────────────────────────────────
+  WARNING  row-group-small  672 of 673 row groups are under 32.00 MiB uncompressed and ...
+                            → Raise the writer's row group size; ...
+  HINT     sort-candidates  Row group min/max ranges overlap heavily in 5 column(s) ...
+                            overlap: dc 100%, idr 100%, store 100%, kode_store 99%, ...
+```
+
+Several files get an overview table instead (score, rows, row groups, size, and the rules that
+fired under each path); add `--details` for every file's findings table. Then comes the dataset
+summary. `--json` output is unaffected by the text options.
 
 Each file gets a score from 0 to 100 and a list of findings with recommendations.
 When more than one file is scanned, a dataset summary follows: file count, total rows and

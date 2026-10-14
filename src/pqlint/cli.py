@@ -4,7 +4,8 @@ import argparse
 import sys
 
 from .reader import expand_paths
-from .report import lint_path, to_json, to_text
+from .render import Style, to_text, use_color
+from .report import lint_path, to_json
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,6 +27,18 @@ def main(argv: list[str] | None = None) -> int:
         help="print only the dataset summary, not per-file findings",
     )
     parser.add_argument(
+        "--details",
+        action="store_true",
+        help="with several files, also print the findings table of every file "
+        "(a single file always shows it)",
+    )
+    parser.add_argument(
+        "--color",
+        choices=["auto", "always", "never"],
+        default="auto",
+        help="colorize text output (default: auto = only on a terminal, honoring NO_COLOR)",
+    )
+    parser.add_argument(
         "--fail-under",
         type=int,
         metavar="N",
@@ -40,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(to_json(reports, args.summary_only))
     else:
-        print(to_text(reports, args.summary_only))
+        print(to_text(reports, args.summary_only, Style(use_color(args.color)), details=args.details))
 
     if any(r.error for r in reports):
         return 2

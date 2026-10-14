@@ -7,9 +7,9 @@ def test_text_output(write, table, capsys):
     path = write(table, compression="none")
     assert main([str(path)]) == 0
     out = capsys.readouterr().out
-    assert "score" in out
+    assert "Score" in out
     assert "uncompressed" in out
-    assert "->" in out
+    assert "Use a codec" in out  # the recommendation is part of the finding
 
 
 def test_json_output(write, table, capsys):
@@ -54,8 +54,8 @@ def test_summary_only_text(write, table, tmp_path, capsys):
     write(table, "b.parquet")
     main([str(tmp_path), "--summary-only"])
     out = capsys.readouterr().out
-    assert out.startswith("Dataset summary: 2 file(s)")
-    assert "a.parquet: score" not in out
+    assert out.startswith("Dataset summary")
+    assert "LEVEL" not in out and "Files (" not in out
 
 
 def test_summary_only_json_omits_files(write, table, capsys):

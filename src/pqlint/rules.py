@@ -4,6 +4,7 @@ from bisect import bisect_left
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
+from .fmt import human_size
 from .models import Finding, Severity
 from .reader import FileInfo
 
@@ -60,7 +61,7 @@ def small_file(info: FileInfo, cfg: Config) -> Iterator[Finding]:
         yield Finding(
             "small-file",
             Severity.WARNING,
-            f"File is {info.size / MiB:.2f} MiB, below {cfg.small_file_bytes / MiB:.0f} MiB.",
+            f"File is {human_size(info.size)}, below {human_size(cfg.small_file_bytes)}.",
             "Compact small files into larger ones to cut per-file open and metadata overhead.",
         )
 
@@ -82,8 +83,8 @@ def row_group_size(info: FileInfo, cfg: Config) -> Iterator[Finding]:
             "row-group-small",
             Severity.WARNING,
             f"{len(small)} of {len(groups)} row groups are under "
-            f"{cfg.row_group_min_bytes / MiB:.0f} MiB uncompressed and "
-            f"{cfg.row_group_min_rows:,} rows (smallest {min(small) / MiB:.2f} MiB).",
+            f"{human_size(cfg.row_group_min_bytes)} uncompressed and "
+            f"{cfg.row_group_min_rows:,} rows (smallest {human_size(min(small))}).",
             "Raise the writer's row group size; tiny row groups weaken compression and stats.",
         )
     large = [s for s in sizes if s > cfg.row_group_max_bytes]
@@ -92,8 +93,8 @@ def row_group_size(info: FileInfo, cfg: Config) -> Iterator[Finding]:
             "row-group-large",
             Severity.WARNING,
             f"{len(large)} of {len(groups)} row groups exceed "
-            f"{cfg.row_group_max_bytes / MiB:.0f} MiB uncompressed "
-            f"(largest {max(large) / MiB:.0f} MiB).",
+            f"{human_size(cfg.row_group_max_bytes)} uncompressed "
+            f"(largest {human_size(max(large))}).",
             "Lower the row group size; huge row groups need a lot of memory and limit parallelism.",
         )
 
@@ -148,7 +149,7 @@ def dictionary_ineffective(info: FileInfo, cfg: Config) -> Iterator[Finding]:
             "dictionary-ineffective",
             Severity.INFO,
             f"{len(cols)} column(s) have a dictionary page of "
-            f"{cfg.dictionary_page_limit_bytes / MiB:.0f} MiB or more.",
+            f"{human_size(cfg.dictionary_page_limit_bytes)} or more.",
             "Likely high-cardinality; consider disabling dictionary encoding for them.",
             tuple(sorted(cols)),
         )

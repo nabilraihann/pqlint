@@ -155,23 +155,23 @@ def make_plan(
     )
 
 
-def describe(plan: Plan) -> str:
+def plan_rows(plan: Plan) -> list[tuple[str, str]]:
+    """Label/value pairs describing what a run would do."""
     gib = 1024 * MiB
-    lines = [
-        f"Input: {len(plan.inputs)} file(s), {plan.rows:,} rows, {plan.row_groups} row groups, "
-        f"{plan.input_bytes / MiB:.1f} MiB",
-        f"Output: ~{plan.output_row_groups} row group(s) of {plan.row_group_rows:,} rows",
-    ]
     if plan.sort_keys:
         keys = ", ".join(f"{n} {'desc' if d == 'descending' else 'asc'}" for n, d in plan.sort_keys)
-        lines.append(f"Sort: {keys} (in memory)")
+        sort = f"{keys} (in memory)"
     else:
-        lines.append("Sort: none (streaming)")
+        sort = "none (streaming)"
     avail = "unknown" if plan.available_bytes is None else f"{plan.available_bytes / gib:.1f} GiB"
-    lines.append(f"Estimated peak memory: {plan.est_peak_bytes / gib:.1f} GiB (available: {avail})")
-    if not plan.fits_in_memory:
-        lines.append("  -> does not fit; a real run is refused unless --force is given")
-    return "\n".join(lines)
+    return [
+        ("Input", f"{len(plan.inputs)} file(s), {plan.row_groups} row groups, "
+                  f"{plan.input_bytes / MiB:.1f} MiB"),
+        ("Rows", f"{plan.rows:,}"),
+        ("Output", f"~{plan.output_row_groups} row group(s) of {plan.row_group_rows:,} rows"),
+        ("Sort", sort),
+        ("Peak memory", f"~{plan.est_peak_bytes / gib:.1f} GiB estimated, {avail} available"),
+    ]
 
 
 def _write_sorted(plan: Plan, tmp: Path, compression: str) -> None:

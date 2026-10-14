@@ -1,4 +1,5 @@
 import random
+import re
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -38,7 +39,8 @@ def test_streaming_rewrites_row_groups_and_keeps_rows(src, tmp_path, capsys):
     assert md.num_rows == N
     assert [md.row_group(i).num_rows for i in range(md.num_row_groups)] == [300, 300, 300, 100]
     assert read(out).equals(read(src))  # same rows, same order
-    assert "row groups 20 -> 4" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert re.search(r"Row groups\s+20\s+4\b", out)
 
 
 def test_streaming_exact_multiple_has_no_tiny_tail(src, tmp_path):
@@ -142,7 +144,7 @@ def test_dry_run_writes_nothing(src, tmp_path, capsys):
     out = tmp_path / "o.parquet"
     assert run(src, out, "--dry-run", "--sort-by", "k") == 0
     assert not out.exists()
-    assert "Sort: k asc (in memory)" in capsys.readouterr().out
+    assert re.search(r"Sort\s+k asc \(in memory\)", capsys.readouterr().out)
 
 
 def test_sort_refused_when_memory_does_not_fit(src, tmp_path, monkeypatch, capsys):

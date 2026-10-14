@@ -4,10 +4,9 @@ import argparse
 import statistics
 import sys
 
-from .compact import CompactError, compact, describe, make_plan, parse_sort
+from . import render
+from .compact import CompactError, compact, make_plan, parse_sort, plan_rows
 from .report import lint_path
-
-MiB = 1024 * 1024
 
 
 def main(argv: list[str]) -> int:
@@ -36,29 +35,57 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--force", action="store_true", help="sort even if the estimate exceeds available memory"
     )
+    parser.add_argument(
+        "--color", choices=["auto", "always", "never"], default="auto", help="colorize output"
+    )
     args = parser.parse_args(argv)
+    st = render.Style(render.use_color(args.color))
 
     try:
         sort_by = parse_sort(args.sort_by) if args.sort_by else None
         plan = make_plan(args.inputs, sort_by, args.row_group_rows)
-        print(describe(plan))
+        print(render.heading(st, "Plan"))
+        rows = plan_rows(plan)
+        if not plan.fits_in_memory:
+            rows[-1] = (rows[-1][0], (rows[-1][1] + "  (does not fit)", ("red", "bold")))
+        print("\n".join(render.kv(st, rows)))
         if args.dry_run:
             return 0
         out = compact(plan, args.output, args.compression, args.overwrite, args.force)
     except CompactError as exc:
-        print(f"pqlint compact: {exc}", file=sys.stderr)
+        print(f"{st('pqlint compact:', 'red', 'bold')} {exc}", file=sys.stderr)
         return 2
 
     before = [lint_path(p) for p in plan.inputs]
     after = lint_path(out)
     scores = [r.score for r in before if r.score is not None]
-    print(f"\nWrote {out}")
+    before_score = round(statistics.fmean(scores)) if scores else None
+    print()
+    print(f"{render.heading(st, 'Wrote')} {out}")
+    print()
     print(
-        f"  row groups {plan.row_groups} -> {after.num_row_groups}, "
-        f"size {plan.input_bytes / MiB:.1f} MiB -> {after.size / MiB:.1f} MiB"
+        "\n".join(
+            render.table(
+                st,
+                ["", "before", "after"],
+                [
+                    ["Row groups", str(plan.row_groups), str(after.num_row_groups)],
+                    [
+                        "Size",
+                        render.human_size(plan.input_bytes),
+                        render.human_size(after.size),
+                    ],
+                    [
+                        "Score",
+                        (str(before_score), render.score_style(before_score)),
+                        (str(after.score), (*render.score_style(after.score), "bold")),
+                    ],
+                ],
+                "<>>",
+            )
+        )
     )
-    if scores and after.score is not None:
-        print(f"  score {statistics.fmean(scores):.0f} -> {after.score}")
-    for f in after.findings:
-        print(f"  {f.severity.value.upper():7} {f.rule}: {f.message}")
+    if after.findings:
+        print()
+        print("\n".join(render.findings_table(st, after.findings)))
     return 0
