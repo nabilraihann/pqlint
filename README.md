@@ -73,19 +73,28 @@ output file with larger row groups, optionally sorted. Inputs are never modified
 
 ```
 uv run pqlint compact data/ -o merged.parquet                       # streaming, low memory
-uv run pqlint compact data/ -o merged.parquet --sort-by dc,store    # sort (in memory)
+uv run pqlint compact data/ -o merged.parquet --sort-by dc,store    # sort (in memory or bucketed)
+uv run pqlint compact big.parquet -o out.parquet --sort-by dc,store --memory-limit 2G
 uv run pqlint compact in.parquet -o out.parquet --sort-by ts:desc --row-group-rows 1000000
 uv run pqlint compact data/ -o merged.parquet --sort-by dc --dry-run   # plan only
 ```
 
 - Without `--sort-by` batches are streamed, so memory stays near one row group, and the row
   group size shrinks automatically if free RAM is low.
-- With `--sort-by` everything is loaded into memory (nulls last, `:desc` for descending). The
-  peak is estimated from sampled row groups and compared with available RAM; the run is refused
-  if it does not fit, unless `--force`. The sort is declared in the footer (`sorting_columns`).
+- With `--sort-by` (nulls last, `:desc` for descending) the peak memory is estimated from
+  sampled row groups. If the whole sort fits in available RAM (or `--memory-limit`), it runs in
+  memory. If not, it is **bucketed**: one pass counts the values of the first sort column, rows
+  are routed into temporary files by ranges of that column, then each bucket is sorted on its own
+  and appended. The result is identical to the in-memory sort; memory is bounded by the largest
+  bucket, and temporary disk of about the input size is used next to the output. One value of
+  the first sort column cannot be split, so if a single value is too large the run is refused
+  unless `--force`. The sort is declared in the footer (`sorting_columns`).
+
+  Example: a 33.6M-row file needing ~10.5 GiB to sort in memory was sorted by `dc,store` in 13
+  buckets on a machine with 3.7 GiB free (peak 2.2 GiB, 65 s), and shrank from 245 to 50 MiB.
 - The output is written to a temporary file, checked for row count and schema, then renamed.
   An existing output needs `--overwrite`, and the output may not be one of the inputs.
-- Other options: `--compression` (default `zstd`), `--row-group-rows`.
+- Other options: `--compression` (default `zstd`), `--row-group-rows`, `--memory-limit`.
 
 ## License
 

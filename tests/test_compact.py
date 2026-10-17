@@ -11,6 +11,12 @@ from pqlint.cli import main
 N = 1000
 
 
+@pytest.fixture(autouse=True)
+def no_process_baseline(monkeypatch):
+    # The fixed interpreter overhead in the memory model dwarfs KB-sized fixtures.
+    monkeypatch.setattr(C, "PROCESS_BASELINE", 0)
+
+
 def shuffled(n=N, seed=0):
     v = list(range(n))
     random.Random(seed).shuffle(v)
@@ -147,18 +153,21 @@ def test_dry_run_writes_nothing(src, tmp_path, capsys):
     assert re.search(r"Sort\s+k asc \(in memory\)", capsys.readouterr().out)
 
 
-def test_sort_refused_when_memory_does_not_fit(src, tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(C, "available_memory", lambda: 1024)
+def test_sort_refused_when_one_key_value_does_not_fit(write, tmp_path, capsys):
+    # A single value of the first sort column cannot be split across buckets.
+    t = pa.table({"g": ["a"] * 900 + ["b"] * 100, "k": shuffled()})
+    src = write(t, "skew.parquet", row_group_size=100)
     out = tmp_path / "o.parquet"
-    assert run(src, out, "--sort-by", "k") == 2
+    assert run(src, out, "--sort-by", "g,k", "--memory-limit", "8K") == 2
     err = capsys.readouterr().err
-    assert "available" in err and "--force" in err
+    assert "'a'" in err and "--force" in err
     assert not out.exists()
-    assert run(src, out, "--sort-by", "k", "--force") == 0
+    assert run(src, out, "--sort-by", "g,k", "--memory-limit", "8K", "--force") == 0
+    assert read(out).equals(read(src).sort_by([("g", "ascending"), ("k", "ascending")]))
 
 
 def test_streaming_is_not_blocked_by_low_memory(src, tmp_path, monkeypatch):
-    monkeypatch.setattr(C, "available_memory", lambda: 1024)
+    monkeypatch.setattr(C, "available_memory", lambda: 1024)  # also never asks to bucket
     assert run(src, tmp_path / "o.parquet") == 0
 
 

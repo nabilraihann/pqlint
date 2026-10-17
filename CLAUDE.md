@@ -15,7 +15,7 @@ uv sync                                   # install dependensi (termasuk dev)
 uv run pytest -q                          # semua tes
 uv run pytest tests/test_rules.py::test_uncompressed   # satu tes
 uv run pqlint <file-atau-folder> [--json] [--summary-only] [--fail-under N]
-uv run pqlint compact <input...> -o <output> [--sort-by a,b:desc] [--dry-run]
+uv run pqlint compact <input...> -o <output> [--sort-by a,b:desc] [--memory-limit 2G] [--dry-run]
 ```
 
 Exit code CLI: 0 normal, 1 jika ada skor di bawah `--fail-under`, 2 jika ada file yang gagal dibaca atau tidak ada file ditemukan.
@@ -32,9 +32,11 @@ Alur: `cli` → `report.lint_path` → `reader.read_local` → `rules.lint`; set
 
 ## Compaction (`pqlint compact`)
 
-`compact.py` (logika) + `compact_cli.py` (argparse); `cli.main` mengalihkan jika argumen pertama `compact`, jadi sebuah file bernama persis `compact` harus ditulis `./compact`. Berbeda dari linter, ini membaca dan menulis data baris. Dua mode: tanpa `--sort-by` streaming (memori ~satu row group), dengan `--sort-by` sort in-memory (`pa.concat_tables` + `sort_by`, null di akhir, `sorting_columns` ditulis ke footer). Keputusan user: `pyarrow` murni dengan pengaman, bukan DuckDB.
+`compact.py` (logika) + `compact_cli.py` (argparse); `cli.main` mengalihkan jika argumen pertama `compact`, jadi sebuah file bernama persis `compact` harus ditulis `./compact`. Berbeda dari linter, ini membaca dan menulis data baris. Tiga strategi (`Plan.strategy`): `streaming` tanpa `--sort-by` (memori ~satu row group); `memory` bila sort penuh muat (`pa.concat_tables` + `sort_by`); `bucketed` bila tidak muat. Null selalu di akhir, `sorting_columns` ditulis ke footer. Keputusan user: `pyarrow` murni dengan pengaman, bukan DuckDB; sort tetap untuk satu file (menggabung beberapa file juga didukung).
+- Bucketed: pass 0 `_count_values` menghitung nilai kolom sort pertama (hanya kolom itu; urutan nilai ditentukan Arrow agar sama dengan `sort_by`), nilai berurutan dikelompokkan jadi bucket yang muat di `BUCKET_MEMORY_SHARE` memori; pass 1 menulis tiap baris ke file sementara bucket-nya (`index_in` + `take`, folder `.<out>.<pid>.tmp.buckets`); pass 2 sort tiap bucket dan menambahkannya lewat `_RowGroupWriter` (row group seragam lintas bucket). Filter menjaga urutan input dan sort Arrow stabil, jadi hasil identik dengan sort in-memory (dites di `test_bucketed_sort.py`). Satu nilai tidak bisa dipecah: bila satu nilai terlalu besar, `Plan.problem` diisi dan run ditolak kecuali `--force`. Batas: `MAX_BUCKET_KEYS`, `MAX_BUCKETS`, cek disk bebas 2,5x input. `--memory-limit` menggantikan `MemAvailable`.
+- `PROCESS_BASELINE` (200 MiB) ikut estimasi bucket; hasil kalibrasi pada file nyata (estimasi 2,2 GiB vs terukur 2,22 GiB). Tes compaction menolkannya lewat fixture autouse karena fixture-nya berukuran KB.
 
-- Estimasi memori **tidak boleh dari footer**: `total_byte_size` adalah ukuran ter-encode; file contoh 245 MiB berukuran 0,34 GiB di footer tetapi ~4,7 GiB sebagai Arrow (string dictionary). `_sample_arrow_bytes_per_row` membaca sampel row group. Faktor puncak: sort 2,2x, streaming 3,5x (terukur ~3,3x). Sort ditolak bila estimasi > `MemAvailable` (/proc/meminfo), kecuali `--force`; streaming justru mengecilkan ukuran row group otomatis.
+- Estimasi memori **tidak boleh dari footer**: `total_byte_size` adalah ukuran ter-encode; file contoh 245 MiB berukuran 0,34 GiB di footer tetapi ~4,7 GiB sebagai Arrow (string dictionary). `_sample_arrow_bytes_per_row` membaca sampel row group. Faktor puncak: sort 2,2x, streaming 3,5x (terukur ~3,3x). Bila sort penuh tidak muat, otomatis bucketed; streaming dan bucketed mengecilkan ukuran row group otomatis sesuai memori.
 - `Table.sort_by` pada kolom dictionary belum didukung pyarrow (`ArrowNotImplementedError`), jadi optimasi membaca string sebagai dictionary tidak bisa dipakai untuk sort.
 - Penulisan lewat file sementara `.<nama>.<pid>.tmp` + verifikasi baris/skema + `os.replace`; tidak pernah menimpa input.
 - Verifikasi bawaan hanya jumlah baris dan skema. Pada file nyata 33,6 juta baris isinya juga dibandingkan penuh secara streaming (identik).

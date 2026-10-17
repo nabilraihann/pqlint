@@ -5,7 +5,7 @@ import statistics
 import sys
 
 from . import render
-from .compact import CompactError, compact, make_plan, parse_sort, plan_rows
+from .compact import CompactError, compact, make_plan, parse_size, parse_sort, plan_rows
 from .report import lint_path
 
 
@@ -36,6 +36,12 @@ def main(argv: list[str]) -> int:
         "--force", action="store_true", help="sort even if the estimate exceeds available memory"
     )
     parser.add_argument(
+        "--memory-limit",
+        metavar="SIZE",
+        help="memory the sort may plan for, e.g. 2G (default: available RAM). "
+        "A sort that does not fit is split into buckets by the first sort column.",
+    )
+    parser.add_argument(
         "--color", choices=["auto", "always", "never"], default="auto", help="colorize output"
     )
     args = parser.parse_args(argv)
@@ -43,11 +49,16 @@ def main(argv: list[str]) -> int:
 
     try:
         sort_by = parse_sort(args.sort_by) if args.sort_by else None
-        plan = make_plan(args.inputs, sort_by, args.row_group_rows)
+        limit = parse_size(args.memory_limit) if args.memory_limit else None
+        plan = make_plan(args.inputs, sort_by, args.row_group_rows, limit)
         print(render.heading(st, "Plan"))
         rows = plan_rows(plan)
         if not plan.fits_in_memory:
-            rows[-1] = (rows[-1][0], (rows[-1][1] + "  (does not fit)", ("red", "bold")))
+            rows = [
+                (k, (v + "  (does not fit)" if k == "Peak memory" else v, ("red", "bold")))
+                if k in ("Peak memory", "Problem") else (k, v)
+                for k, v in rows
+            ]
         print("\n".join(render.kv(st, rows)))
         if args.dry_run:
             return 0
