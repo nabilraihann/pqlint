@@ -172,3 +172,19 @@ def test_parse_size(text, expected):
 def test_parse_size_rejects_garbage():
     with pytest.raises(C.CompactError):
         C.parse_size("lots")
+
+
+def test_big_single_value_within_memory_is_not_refused(write, tmp_path):
+    # "a" holds 60% of the rows: over the per-bucket grouping budget (60% of memory
+    # spread over buckets) but its own sort still fits in the limit.
+    t = pa.table({"g": ["a"] * 1200 + ["b"] * 400 + ["c"] * 400, "k": list(range(2000))[::-1]})
+    src = write(t, "skew.parquet", row_group_size=100)
+    keys = [("g", "ascending"), ("k", "ascending")]
+    full = C.make_plan([str(src)], keys)
+    limit = int(full.est_peak_bytes * 0.9)
+    plan = C.make_plan([str(src)], keys, memory_limit=limit)
+    assert plan.strategy == C.BUCKETED
+    assert plan.problem is None and plan.fits_in_memory
+    out = tmp_path / "o.parquet"
+    assert compact_with(src, out, keys, limit) == 0
+    assert pq.read_table(out).equals(pq.read_table(src).sort_by(keys))

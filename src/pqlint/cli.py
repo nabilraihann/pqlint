@@ -14,10 +14,15 @@ def main(argv: list[str] | None = None) -> int:
         from .compact_cli import main as compact_main
 
         return compact_main(argv[1:])
+    if argv and argv[0] == "suggest-sort":
+        from .suggest import main as suggest_main
+
+        return suggest_main(argv[1:])
     parser = argparse.ArgumentParser(
         prog="pqlint",
         description="Lint Parquet files using only their footer metadata.",
-        epilog="To rewrite files with larger row groups and an optional sort: pqlint compact --help",
+        epilog="Subcommands: `pqlint compact --help` rewrites files with larger row groups and an "
+        "optional sort; `pqlint suggest-sort --help` measures which sort order makes a file smallest.",
     )
     parser.add_argument("paths", nargs="+", help="Parquet files or directories")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")

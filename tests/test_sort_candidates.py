@@ -97,12 +97,12 @@ def test_column_with_a_stats_gap_is_skipped(make):
     assert f.columns == ("y",)
 
 
-def test_nan_values_do_not_break_judging(make):
-    # pyarrow leaves NaN out of min/max, so the column is still judged normally.
+def test_float_columns_are_not_candidates(make):
+    # Floats are measures (amounts, prices), not keys anyone filters ranges of.
     vals = [float(v) for v in shuffled()]
     vals[0] = float("nan")
-    f, _ = sort_finding(make({"x": vals}))
-    assert f.columns == ("x",)
+    f, _ = sort_finding(make({"amount": vals, "k": shuffled(seed=4)}))
+    assert f.columns == ("k",)
 
 
 def test_list_column_is_skipped(make):

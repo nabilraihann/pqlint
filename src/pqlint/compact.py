@@ -190,7 +190,9 @@ def _bucket(plan_args: dict, inputs: list[Path], sort_keys, avail: int, bpr: flo
             f"the sort would need {len(rows_per)} buckets (limit {MAX_BUCKETS}); "
             "free memory or raise --memory-limit"
         )
-    elif largest > max_rows:
+    elif largest * bpr * SORT_PEAK_FACTOR + overhead > avail:
+        # max_rows only guides how values are grouped; a bucket larger than that is
+        # still fine as long as the real peak fits in memory.
         if nulls == largest:
             what = f"the null values of {first!r}"
         else:

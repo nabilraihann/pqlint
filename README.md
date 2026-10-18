@@ -56,7 +56,8 @@ be read or no Parquet files were found.
 intersect (0% = every row group holds its own range, so engines can skip them; 100% = every
 pair overlaps, so a filter on that column skips nothing). A high percentage means sorting or clustering
 by that column would help *if queries filter on it*; the footer cannot know that, so treat the
-list as candidates. Skipped: columns without stats in every row group, constant and boolean
+list as candidates. It is about filter speed, not file size: for size, use `pqlint suggest-sort`
+(below). Skipped: columns without stats in every row group, constant, boolean and floating-point
 columns, list columns, columns already declared sorted in the footer, and files with fewer
 than 4 row groups.
 
@@ -95,6 +96,33 @@ uv run pqlint compact data/ -o merged.parquet --sort-by dc --dry-run   # plan on
 - The output is written to a temporary file, checked for row count and schema, then renamed.
   An existing output needs `--overwrite`, and the output may not be one of the inputs.
 - Other options: `--compression` (default `zstd`), `--row-group-rows`, `--memory-limit`.
+
+## Choosing a sort order for file size
+
+```
+uv run pqlint suggest-sort data.parquet                    # measure which --sort-by makes it smallest
+uv run pqlint suggest-sort data.parquet --start-with dc    # keep dc first (e.g. the main filter)
+```
+
+How small a sorted file gets depends on run lengths and on how columns depend on each other,
+which only the data shows, so this reads a sample (it writes nothing):
+
+- The sample keeps **every row of a random subset of one entity column** (picked automatically:
+  the column with the most distinct values that is not an id, e.g. a store code). A sample of
+  row groups or random rows breaks up the groups that make sorted data compress well and gave
+  estimates off by 35% to 3x on a real file; the entity sample landed within about 5%.
+- Floating-point columns (measures), near-unique columns (ids), constant columns and columns that
+  group rows exactly like another one (item code vs item name) are not tried as keys.
+- Whole orders are compared: the best of a greedy order and the cardinality-ascending and
+  -descending orders is improved by moving one column at a time, then keys that barely change the
+  size are dropped. Growing an order one best key at a time stopped on a worse order, because
+  the good one only pulls ahead after three or four keys.
+- The output lists the chosen order step by step with estimated sizes and the `pqlint compact`
+  command to run.
+
+On the 33.6M-row example it recommended `category,dc,store,item_code_b2b` (13.4 MiB after
+compaction) where `dc,store` gave 50 MiB; the best order found by hand was 12.9 MiB. It takes
+about two minutes there.
 
 ## License
 

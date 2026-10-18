@@ -225,7 +225,8 @@ def sort_candidates(info: FileInfo, cfg: Config) -> Iterator[Finding]:
 
     ranges: dict[str, list[tuple] | None] = {}
     for _, name, c in _chunks(info):
-        if name in skip or c.physical_type == "BOOLEAN":
+        # Booleans barely cluster; floats are measures (amounts, prices), not filter keys.
+        if name in skip or c.physical_type in ("BOOLEAN", "FLOAT", "DOUBLE"):
             continue
         st = c.statistics if c.is_stats_set else None
         if st is None or not st.has_min_max or _is_nan(st.min) or _is_nan(st.max):
@@ -254,8 +255,9 @@ def sort_candidates(info: FileInfo, cfg: Config) -> Iterator[Finding]:
         Severity.HINT,
         f"Row group min/max ranges overlap heavily in {len(top)} column(s), "
         "most overlapping first.",
-        "Sort or cluster the data by the column(s) you filter on most; engines can then "
-        "skip row groups. Footer stats cannot tell which column that is.",
+        "If queries filter on one of these, sort by it first so engines can skip row "
+        "groups (this is about filter speed, not file size; for size run "
+        "`pqlint suggest-sort`).",
         tuple(n for _, n in top),
         {n: round(s, 3) for s, n in top},
     )
