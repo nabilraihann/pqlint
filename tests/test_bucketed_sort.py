@@ -188,3 +188,17 @@ def test_big_single_value_within_memory_is_not_refused(write, tmp_path):
     out = tmp_path / "o.parquet"
     assert compact_with(src, out, keys, limit) == 0
     assert pq.read_table(out).equals(pq.read_table(src).sort_by(keys))
+
+
+def test_limit_below_fixed_overhead_says_so(src, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(C, "PROCESS_BASELINE", 200 * 1024**2)
+    keys = [("k", "ascending")]
+    assert compact_with(src, tmp_path / "o.parquet", keys, 150 * 1024**2) == 2
+    err = capsys.readouterr().err
+    assert "below what the compaction needs" in err
+    assert "cannot be split" not in err
+
+
+def test_plan_labels_a_given_limit(src, capsys):
+    main(["compact", str(src), "-o", "x.parquet", "--sort-by", "k", "--memory-limit", "1G", "--dry-run"])
+    assert "1.00 GiB limit" in capsys.readouterr().out

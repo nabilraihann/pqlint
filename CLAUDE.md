@@ -17,6 +17,7 @@ uv run pytest tests/test_rules.py::test_uncompressed   # satu tes
 uv run pqlint <file-atau-folder> [--json] [--summary-only] [--fail-under N]
 uv run pqlint compact <input...> -o <output> [--sort-by a,b:desc] [--memory-limit 2G] [--dry-run]
 uv run pqlint suggest-sort <input...> [--start-with dc] [--sample-rows N]
+uv run python examples/make_demo_data.py demo   # data sintetis untuk docs/contoh-penggunaan.md
 ```
 
 Exit code CLI: 0 normal, 1 jika ada skor di bawah `--fail-under`, 2 jika ada file yang gagal dibaca atau tidak ada file ditemukan.
@@ -58,6 +59,8 @@ Untuk **ukuran file**, berbeda dari aturan `sort-candidates` yang untuk **kecepa
 - `dictionary-ineffective` adalah heuristik: footer tidak bisa membedakan fallback ke PLAIN (`encodings` sama persis dengan kolom yang tidak fallback). Dipakai ukuran halaman dictionary on-disk >= 1 MiB; heuristik rasio sudah dicoba dan membuang kolom unik biasa seperti id, jadi jangan dikembalikan.
 - Kolom bertipe logical `Null` (pandas/pyarrow menulisnya untuk kolom yang isinya None semua) tidak pernah punya stats; ditangani khusus: dilaporkan sebagai `all-null-column`, bukan `missing-stats`. Kolom di bawah repeated field (list) dilewati oleh `all-null-column` karena list kosong dihitung sebagai null di leaf.
 - `sort-candidates` memakai `Severity.HINT` (penalti 0: saran, bukan cacat) dan `Finding.details` untuk angka per kolom. Metrik `_overlap` = fraksi pasangan row group yang rentang min/max-nya beririsan (dihitung lewat pasangan terpisah dengan bisect pada max terurut, O(n log n)), jadi berlaku untuk string/tanggal: 0 = semua terpisah, 1 = semua beririsan. Versi awal yang menghitung kedalaman di titik min memberi 50% untuk data teracak murni; tes di `test_compact.py` yang menangkapnya. Footer tidak tahu kolom mana yang sering difilter, jadi hasilnya hanya kandidat; kolom float (ukuran/nilai) tidak ikut dinilai. Untuk ukuran file pakai `suggest-sort`. pyarrow tidak memasukkan NaN ke min/max.
+- `docs/contoh-penggunaan.md` memuat keluaran nyata dari data `examples/make_demo_data.py`; bila format keluaran CLI berubah, jalankan ulang perintahnya dan perbarui dokumen itu. Jangan memakai file data milik user di dokumen (berisi nama toko/item nyata).
+- Estimasi memori semua strategi memuat `PROCESS_BASELINE`; bila `--memory-limit` di bawah overhead tetap itu, `Plan.problem` menjelaskannya (dicek sebelum batas jumlah bucket, agar pesannya tidak menyesatkan).
 - `*.parquet` ada di `.gitignore` agar dataset yang dites di folder repo tidak ikut ter-commit.
 - Tes memperkecil ambang lewat `Config` agar file fixture tetap kecil; hanya tes dictionary yang menulis ~2 MB tanpa kompresi.
 

@@ -2,6 +2,9 @@
 
 Lint Parquet files using only their footer metadata. No row data is read.
 
+Worked examples (in Indonesian) with real output: [docs/contoh-penggunaan.md](docs/contoh-penggunaan.md).
+Demo data: `uv run python examples/make_demo_data.py demo`.
+
 ```
 uv sync
 uv run pqlint path/to/file.parquet          # a file, or a directory (recursive)

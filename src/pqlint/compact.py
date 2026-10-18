@@ -25,6 +25,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from .fmt import human_size
 from .reader import expand_paths
 
 MiB = 1024 * 1024
@@ -73,6 +74,7 @@ class Plan:
     bucket_rows: tuple[int, ...] = ()
     null_rows: int = 0
     problem: str | None = None  # why the plan cannot run within memory, if it cannot
+    memory_from_limit: bool = False  # available_bytes came from --memory-limit
 
     @property
     def output_row_groups(self) -> int:
@@ -185,7 +187,12 @@ def _bucket(plan_args: dict, inputs: list[Path], sort_keys, avail: int, bpr: flo
         null_rows=nulls,
         est_peak_bytes=int(largest * bpr * SORT_PEAK_FACTOR + overhead),
     )
-    if len(rows_per) > MAX_BUCKETS:
+    if overhead >= avail:
+        plan_args["problem"] = (
+            f"the memory limit ({human_size(avail)}) is below what the compaction needs before "
+            f"sorting anything (~{human_size(overhead)} for the output buffer and the process)"
+        )
+    elif len(rows_per) > MAX_BUCKETS:
         plan_args["problem"] = (
             f"the sort would need {len(rows_per)} buckets (limit {MAX_BUCKETS}); "
             "free memory or raise --memory-limit"
@@ -199,8 +206,8 @@ def _bucket(plan_args: dict, inputs: list[Path], sort_keys, avail: int, bpr: flo
             what = f"the value {values[counts.index(largest)].as_py()!r} of {first!r}"
         plan_args["problem"] = (
             f"{what} alone has {largest:,} rows, about "
-            f"{largest * bpr * SORT_PEAK_FACTOR / GiB:.1f} GiB to sort, and one value cannot be "
-            "split across buckets"
+            f"{human_size(largest * bpr * SORT_PEAK_FACTOR + overhead)} to sort, more than "
+            f"{human_size(avail)}, and one value cannot be split across buckets"
         )
 
 
@@ -241,7 +248,7 @@ def make_plan(
             raise CompactError(f"unknown sort column {name!r}; columns: {', '.join(schema.names)}")
 
     avail = memory_limit if memory_limit is not None else available_memory()
-    full_sort_peak = rows * bpr * SORT_PEAK_FACTOR
+    full_sort_peak = rows * bpr * SORT_PEAK_FACTOR + PROCESS_BASELINE
     if not sort_keys:
         strategy = STREAMING
     elif avail is None or full_sort_peak <= avail:
@@ -268,10 +275,13 @@ def make_plan(
         row_group_rows=row_group_rows,
         arrow_bytes_per_row=bpr,
         est_peak_bytes=int(
-            full_sort_peak if strategy == MEMORY else row_group_rows * bpr * STREAM_PEAK_FACTOR
+            full_sort_peak
+            if strategy == MEMORY
+            else row_group_rows * bpr * STREAM_PEAK_FACTOR + PROCESS_BASELINE
         ),
         available_bytes=avail,
         strategy=strategy,
+        memory_from_limit=memory_limit is not None,
     )
     if strategy == BUCKETED:
         _bucket(args, inputs, sort_keys, avail, bpr, row_group_rows)
@@ -292,7 +302,12 @@ def plan_rows(plan: Plan) -> list[tuple[str, str]]:
         )
     else:
         sort = "none (streaming)"
-    avail = "unknown" if plan.available_bytes is None else f"{plan.available_bytes / GiB:.1f} GiB"
+    if plan.available_bytes is None:
+        avail = "unknown available"
+    elif plan.memory_from_limit:
+        avail = f"{human_size(plan.available_bytes)} limit"
+    else:
+        avail = f"{human_size(plan.available_bytes)} available"
     rows = [
         ("Input", f"{len(plan.inputs)} file(s), {plan.row_groups} row groups, "
                   f"{plan.input_bytes / MiB:.1f} MiB"),
@@ -304,7 +319,7 @@ def plan_rows(plan: Plan) -> list[tuple[str, str]]:
         rows.append(("Temp disk", f"~{plan.input_bytes / MiB:.0f} MiB next to the output"))
     if plan.problem:
         rows.append(("Problem", plan.problem))
-    rows.append(("Peak memory", f"~{plan.est_peak_bytes / GiB:.1f} GiB estimated, {avail} available"))
+    rows.append(("Peak memory", f"~{human_size(plan.est_peak_bytes)} estimated, {avail}"))
     return rows
 
 
@@ -413,8 +428,8 @@ def compact(plan: Plan, output: str | os.PathLike[str], compression: str = "zstd
         raise CompactError(f"output directory {out.parent} does not exist")
     if plan.sort_keys and not plan.fits_in_memory and not force:
         reason = plan.problem or (
-            f"sorting needs about {plan.est_peak_bytes / GiB:.1f} GiB but only "
-            f"{plan.available_bytes / GiB:.1f} GiB is available"
+            f"sorting needs about {human_size(plan.est_peak_bytes)} but only "
+            f"{human_size(plan.available_bytes)} is available"
         )
         raise CompactError(
             f"{reason}. Free memory, run on a larger machine, or drop --sort-by to compact "
