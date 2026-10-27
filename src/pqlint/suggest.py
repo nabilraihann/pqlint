@@ -138,9 +138,39 @@ def _entity_sample(inputs: list[Path], entity: str, fraction: float, seed: int) 
     return pa.Table.from_batches(parts)
 
 
-def _encoded_size(table: pa.Table, keys: list[str], compression: str) -> int:
+def _rank_table(table: pa.Table, columns: list[str]) -> pa.Table:
+    """Dense integer ranks (nulls last) of `columns`, to sort on instead of the raw values.
+
+    Ranking each column once makes every later sort an integer sort. Dictionary
+    columns are decoded first (neither rank nor sort_by handles them); a column
+    whose rank is not implemented stays as its plain values, which sort_indices
+    can still order.
+    """
+    out = {}
+    for name in columns:
+        col = table[name]
+        if pa.types.is_dictionary(col.type):
+            col = col.cast(col.type.value_type)
+        try:
+            out[name] = pc.rank(col, sort_keys="ascending", tiebreaker="dense")
+        except (pa.ArrowNotImplementedError, pa.ArrowInvalid):
+            out[name] = col
+    return pa.table(out)
+
+
+def _order(ranks: pa.Table, keys: list[str]) -> pa.Array:
+    """Row order that sorts by `keys` ascending, nulls last; ties keep input order."""
+    return pc.sort_indices(ranks, sort_keys=[(k, "ascending") for k in keys])
+
+
+def _encoded_size(
+    table: pa.Table, keys: list[str], compression: str, ranks: pa.Table | None = None
+) -> int:
     if keys:
-        table = table.sort_by([(k, "ascending") for k in keys])
+        if ranks is None:
+            table = table.sort_by([(k, "ascending") for k in keys])
+        else:
+            table = table.take(_order(ranks, keys))
     sink = pa.BufferOutputStream()
     pq.write_table(table, sink, compression=compression, row_group_size=max(table.num_rows, 1))
     return sink.getvalue().size
