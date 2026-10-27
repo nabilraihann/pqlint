@@ -276,3 +276,72 @@ def test_prefetch_propagates_worker_errors(small_sample):
         scorer.prefetch(ORDERS)
     assert scorer.tried == 0  # nothing half-cached
     assert threading.active_count() == before  # the pool was shut down
+
+
+# --- wiring: threads, dictionary columns, error handling ---------------------
+
+
+def test_resolve_threads_cases():
+    r = S.resolve_threads
+    assert r(3, 10**9, 1, cpus=16) == 3  # an explicit value wins
+    assert r(0, 10**9, None, cpus=16) == 1 and r(-5, 10**9, None, cpus=16) == 1
+    assert r(None, 10**6, 10**12, cpus=16) == 8  # capped at MAX_AUTO_THREADS
+    assert r(None, 10**6, 10**12, cpus=2) == 2
+    assert r(None, 10**6, None, cpus=16) == 4  # memory unknown
+    sample = 10**6
+    assert r(None, sample, int(3 * 1.5 * sample / 0.5), cpus=16) == 3  # memory cap
+    assert r(None, sample, 1, cpus=16) == 1
+
+
+def test_threads_do_not_change_the_result(sales):
+    assert run(sales, threads=1) == run(sales, threads=4)
+
+
+def dictionary_file(write):
+    """Shuffled day-by-day rows (like `sales`), with the store column dictionary-encoded."""
+    rnd = random.Random(2)
+    rows = [(f"S{s:02d}", i, d) for s in range(50) for i in range(5) for d in range(8)] * 2
+    rnd.shuffle(rows)
+    stores, items, days = zip(*rows)
+    t = pa.table(
+        {"store": pa.array(stores).dictionary_encode(), "item": list(items), "day": list(days)}
+    )
+    return write(t, "dict.parquet", row_group_size=500)
+
+
+def test_suggest_works_with_dictionary_columns(write):
+    path = dictionary_file(write)
+    assert pq.ParquetFile(path).schema_arrow.field("store").type == pa.dictionary(pa.int32(), pa.string())
+    s = run(path)
+    assert s.best.keys and set(s.best.keys) <= {"store", "item", "day"}
+
+
+def test_suggest_samples_dictionary_entity_columns(write):
+    # A sample smaller than the file takes the entity-subset path, which reads and
+    # filters the (dictionary-typed) entity column.
+    s = run(dictionary_file(write), sample_rows=600)
+    assert s.sample_rows < 4000 and s.best.keys
+
+
+def test_tiny_but_valid_input_is_fine(write):
+    t = pa.table({"g": [i % 2 for i in range(12)], "h": [i % 3 for i in range(12)]})
+    path = write(t, "tiny.parquet")
+    for threads in (1, 8):
+        assert isinstance(run(path, threads=threads), S.Suggestion)
+
+
+def test_three_row_input_is_a_clean_error(write):
+    path = write(pa.table({"g": [1, 1, 2]}), "three.parquet")
+    with pytest.raises(S.SuggestError, match="no column is usable"):
+        run(path, threads=4)
+
+
+def test_bad_compression_is_a_clean_error(sales):
+    with pytest.raises(S.SuggestError, match="no-such-codec"):
+        run(sales, compression="no-such-codec")
+
+
+def test_progress_reports_thread_count(sales):
+    messages = []
+    run(sales, threads=2, progress=messages.append)
+    assert any("2 thread" in m for m in messages)

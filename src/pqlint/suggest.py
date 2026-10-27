@@ -27,6 +27,7 @@ and settled on item,store (15.3 MiB real) instead of dc,store,item,day
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -38,7 +39,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from . import render
-from .compact import _count_values
+from .compact import _count_values, available_memory
 from .reader import expand_paths
 
 PROBE_ROW_GROUPS = 40  # spread row groups read to estimate cardinalities
@@ -47,6 +48,9 @@ DEFAULT_SAMPLE_ROWS = 1_000_000
 MAX_CLIMB_ROUNDS = 10
 MIN_CLIMB_GAIN = 0.005  # a move must shrink the search sample by this much
 TRIM_TOLERANCE = 0.01  # drop keys whose removal grows the size by less than this
+MAX_AUTO_THREADS = 8
+THREAD_MEMORY_SHARE = 0.5  # of available memory the parallel trials may use
+TRIAL_MEMORY_FACTOR = 1.5  # one trial holds about a sorted copy of the sample
 
 
 class SuggestError(Exception):
@@ -125,18 +129,50 @@ def _candidates(schema: pa.Schema, probe: pa.Table, start: list[str]):
     return keep, distinct, skipped
 
 
+def _plain(arr: pa.Array) -> pa.Array:
+    """The values of a dictionary array (e.g. a pandas category); other arrays unchanged."""
+    return arr.cast(arr.type.value_type) if pa.types.is_dictionary(arr.type) else arr
+
+
 def _entity_sample(inputs: list[Path], entity: str, fraction: float, seed: int) -> pa.Table:
     if fraction >= 1:
         return pa.concat_tables([pq.ParquetFile(p).read() for p in inputs])
     values, _, _ = _count_values(inputs, entity, "ascending")
     rnd = random.Random(seed)
     picked = [i for i in range(len(values)) if rnd.random() < fraction] or [0]
-    chosen = values.take(pa.array(picked))
+    chosen = _plain(values.take(pa.array(picked)))
     parts = []
     for path in inputs:
         for batch in pq.ParquetFile(path).iter_batches(batch_size=1 << 20):
-            parts.append(batch.filter(pc.is_in(batch.column(entity), value_set=chosen)))
+            keep = pc.is_in(_plain(batch.column(entity)), value_set=chosen)
+            parts.append(batch.filter(keep))
     return pa.Table.from_batches(parts)
+
+
+def resolve_threads(
+    requested: int | None, sample_bytes: int, available: int | None, cpus: int | None = None
+) -> int:
+    """Worker threads for the trials. An explicit request is used as given (at least 1).
+
+    Automatic: every core up to MAX_AUTO_THREADS, but only as many as fit in the share
+    of available memory that parallel trials may use; 4 when memory is unknown.
+    """
+    if requested is not None:
+        return max(1, requested)
+    cpus = cpus or os.cpu_count() or 1
+    if available is None:
+        cap = 4
+    else:
+        cap = int(THREAD_MEMORY_SHARE * available / (TRIAL_MEMORY_FACTOR * max(sample_bytes, 1)))
+    return max(1, min(cpus, MAX_AUTO_THREADS, cap))
+
+
+def _check_compression(codec: str) -> None:
+    """Fail early and cleanly on a codec this pyarrow cannot write."""
+    try:
+        pq.write_table(pa.table({"x": [0]}), pa.BufferOutputStream(), compression=codec)
+    except (ValueError, pa.ArrowException) as exc:
+        raise SuggestError(f"unsupported compression codec {codec!r}") from exc
 
 
 def _rank_table(table: pa.Table, columns: list[str]) -> pa.Table:
@@ -235,8 +271,10 @@ def suggest(
     max_keys: int = 6,
     min_gain: float = 0.02,
     seed: int = 0,
+    threads: int | None = None,
     progress=None,
 ) -> Suggestion:
+    _check_compression(compression)
     inputs = list(expand_paths(paths))
     if not inputs:
         raise SuggestError("no parquet files found")
@@ -265,15 +303,12 @@ def suggest(
     sample = _entity_sample(inputs, entity, fraction, seed)
     scale = rows / max(sample.num_rows, 1)
 
-    search = sample  # a smaller subsample biased the ranking; see the module docstring
-    scores: dict[tuple[str, ...], int] = {}
-
-    def score(keys: list[str]) -> int:
-        """Encoded size of the (smaller) search sample sorted by `keys`."""
-        key = tuple(keys)
-        if key not in scores:
-            scores[key] = _encoded_size(search, list(key), compression)
-        return scores[key]
+    threads = resolve_threads(threads, sample.nbytes, available_memory())
+    if progress:
+        progress(f"searching with {threads} thread(s)")
+    # A smaller search subsample biased the ranking; see the module docstring.
+    scorer = _Scorer(sample, list(dict.fromkeys(candidates + start)), compression, threads)
+    score = scorer
 
     # Whole orders are compared, not prefixes: the best order (coarse to fine,
     # e.g. dc, store, item, day) only pulls ahead after three or four keys, so
@@ -284,11 +319,13 @@ def suggest(
     while rest:
         if progress:
             progress(f"greedy start: key {len(greedy) + 1} of {len(movable)}")
+        scorer.prefetch([start + greedy + [c] for c in rest])
         pick = min(rest, key=lambda c: (score(start + greedy + [c]), c))
         greedy.append(pick)
         rest.remove(pick)
     by_card = sorted(movable, key=lambda c: (distinct[c], c))
     seeds = [greedy, by_card, by_card[::-1]]
+    scorer.prefetch([start + o for o in seeds])
     order = min(seeds, key=lambda o: (score(start + o), o))
 
     for round_ in range(MAX_CLIMB_ROUNDS):
@@ -304,6 +341,7 @@ def suggest(
         if progress:
             progress(f"improving: round {round_ + 1}, {len(neighbours)} neighbouring orders, "
                      f"current ~{score(start + order) * scale / 2**20:.1f} MiB")
+        scorer.prefetch([start + o for o in neighbours])
         cand = min(neighbours, key=lambda o: (score(start + o), o))
         if score(start + cand) >= score(start + order) * (1 - MIN_CLIMB_GAIN):
             break
@@ -315,8 +353,10 @@ def suggest(
     changed = True
     while changed:
         changed = False
-        for k in final[len(start):]:
-            shorter = [c for c in final if c != k]
+        removable = final[len(start):]
+        variants = [[c for c in final if c != k] for k in removable]
+        scorer.prefetch([v for v in variants if v] + [final])
+        for shorter in variants:
             if shorter and score(shorter) <= score(final) * (1 + TRIM_TOLERANCE):
                 final = shorter
                 changed = True
@@ -327,11 +367,13 @@ def suggest(
         size = score(keys)
         return Step(list(keys), size, int(size * scale))
 
+    prefixes = [final[:n] for n in range(max(len(start), 1), len(final) + 1)]
+    scorer.prefetch([[]] + prefixes)
     unsorted = measure([])
-    steps = [measure(final[:n]) for n in range(max(len(start), 1), len(final) + 1)]
+    steps = [measure(p) for p in prefixes]
     if steps and steps[-1].sample_bytes >= unsorted.sample_bytes * (1 - min_gain):
         steps = []  # sorting does not pay off
-    tried = len(scores)
+    tried = scorer.tried
 
     return Suggestion(
         inputs=inputs,
