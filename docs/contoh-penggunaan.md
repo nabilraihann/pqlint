@@ -209,6 +209,7 @@ uv run pqlint suggest-sort demo/sales.parquet
 
 ```
 … sampling all rows of ~100.0% of the 'kode_store' values
+… searching with 8 thread(s)
 … greedy start: key 1 of 5
 …
 … improving: round 3, 20 neighbouring orders, current ~0.4 MiB
@@ -216,7 +217,7 @@ Sort suggestion (for file size)
   Input        1 file(s), 720,000 rows, 4.04 MiB
   Sample       720,000 rows: every row of a random subset of 'kode_store' values
   Compression  zstd
-  Tried        62 orders
+  Tried        67 orders
 
   STEP  SORT KEYS              EST. SIZE  VS UNSORTED
   ────  ────────────────────  ──────────  ───────────
@@ -243,7 +244,10 @@ Sort suggestion (for file size)
   Pada file ini sampelnya mencakup seluruh data. Pada file besar galatnya sekitar ±5%.
 - Kolom yang **tidak dicoba** dan alasannya ditampilkan: kolom nilai (`idr`), konstan, dan
   kolom yang pengelompokannya identik dengan kolom lain (`store` ↔ `kode_store`).
-- Pencarian ini memakan waktu (±35 detik di sini, ±2 menit untuk 33 juta baris).
+- Percobaan dijalankan **paralel** (jumlah thread menyesuaikan jumlah core dan memori bebas,
+  maksimal 8; baris `searching with N thread(s)` menunjukkannya). Pada data demo ini sekitar
+  8 detik; untuk file 33 juta baris sekitar 24 detik (sebelumnya ±86 detik). Rekomendasi dan
+  estimasi ukurannya sama persis untuk jumlah thread berapa pun.
 
 **Bila query sering memfilter kolom tertentu**, kunci kolom itu di depan dengan `--start-with`.
 File sedikit lebih besar, tetapi filter pada kolom itu bisa melewatkan row group:
@@ -264,7 +268,7 @@ uv run pqlint suggest-sort demo/sales.parquet --start-with dc
 ```
 
 Opsi lain: `--sample-rows N` (bawaan 1 juta), `--compression gzip` (mengukur dengan codec
-lain), dan `--max-keys N`.
+lain), `--max-keys N`, dan `--threads N` (bawaan otomatis; `--threads 1` = serial).
 
 ## 6. Merapikan file dengan compact
 

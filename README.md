@@ -105,6 +105,7 @@ uv run pqlint compact data/ -o merged.parquet --sort-by dc --dry-run   # plan on
 ```
 uv run pqlint suggest-sort data.parquet                    # measure which --sort-by makes it smallest
 uv run pqlint suggest-sort data.parquet --start-with dc    # keep dc first (e.g. the main filter)
+uv run pqlint suggest-sort data.parquet --threads 4        # parallel trials (default: automatic, max 8)
 ```
 
 How small a sorted file gets depends on run lengths and on how columns depend on each other,
@@ -125,7 +126,8 @@ which only the data shows, so this reads a sample (it writes nothing):
 
 On the 33.6M-row example it recommended `category,dc,store,item_code_b2b` (13.4 MiB after
 compaction) where `dc,store` gave 50 MiB; the best order found by hand was 12.9 MiB. It takes
-about two minutes there.
+about 24 seconds there (86 s before the trials ran in parallel; `--threads 1` takes 53 s). The
+recommendation and estimated sizes do not depend on the thread count.
 
 ## License
 
