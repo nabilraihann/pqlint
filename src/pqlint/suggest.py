@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -174,6 +175,56 @@ def _encoded_size(
     sink = pa.BufferOutputStream()
     pq.write_table(table, sink, compression=compression, row_group_size=max(table.num_rows, 1))
     return sink.getvalue().size
+
+
+class _Scorer:
+    """Encoded size of the sample sorted by a key list, cached by key tuple.
+
+    `prefetch` fills the cache for many orders at once, in threads: sorting and
+    writing run inside Arrow with the GIL released. Workers only read the sample
+    and the rank table; the cache is written here after every worker finished,
+    so the outcome never depends on the thread count and a failing worker leaves
+    the cache untouched.
+    """
+
+    def __init__(
+        self,
+        sample: pa.Table,
+        columns: list[str],
+        compression: str,
+        threads: int = 1,
+        use_ranks: bool = True,
+    ) -> None:
+        self.sample = sample
+        self.compression = compression
+        self.threads = max(1, threads)
+        self.ranks = _rank_table(sample, columns) if use_ranks and columns else None
+        self.cache: dict[tuple[str, ...], int] = {}
+
+    def _compute(self, keys: tuple[str, ...]) -> int:
+        return _encoded_size(self.sample, list(keys), self.compression, self.ranks)
+
+    def __call__(self, keys: list[str]) -> int:
+        key = tuple(keys)
+        if key not in self.cache:
+            self.cache[key] = self._compute(key)
+        return self.cache[key]
+
+    def prefetch(self, orders: list[list[str]]) -> None:
+        missing = list(dict.fromkeys(tuple(o) for o in orders if tuple(o) not in self.cache))
+        if not missing:
+            return
+        workers = min(self.threads, len(missing))
+        if workers == 1:
+            sizes = [self._compute(k) for k in missing]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                sizes = list(pool.map(self._compute, missing))
+        self.cache.update(zip(missing, sizes))
+
+    @property
+    def tried(self) -> int:
+        return len(self.cache)
 
 
 def suggest(

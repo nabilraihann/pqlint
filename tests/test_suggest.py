@@ -1,6 +1,7 @@
 import datetime
 import decimal
 import random
+import threading
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -203,3 +204,75 @@ def test_unsupported_rank_type_falls_back(typed_table, monkeypatch):
     ranks = S._rank_table(typed_table, ["d", "i"])
     assert ranks["d"].type == pa.date32()  # kept as the original values
     assert S._order(ranks, ["d", "i"]).equals(reference_order(typed_table, ["d", "i"]))
+
+
+# --- cached, parallel scorer ----------------------------------------------
+
+ORDERS = [
+    ["region"],
+    ["store", "item"],
+    ["item", "store", "day"],
+    ["day", "item"],
+    ["region", "store", "item", "day"],
+    ["store"],
+]
+
+
+@pytest.fixture
+def small_sample():
+    rnd = random.Random(3)
+    rows = [(f"R{s % 4}", f"S{s:02d}", i, d) for s in range(40) for i in range(6) for d in range(1, 6)]
+    rnd.shuffle(rows)
+    cols = list(zip(*rows))
+    return pa.table({"region": cols[0], "store": cols[1], "item": cols[2], "day": cols[3]})
+
+
+def scorer_for(sample, threads=1, compression="zstd", **kw):
+    return S._Scorer(sample, ["region", "store", "item", "day"], compression, threads, **kw)
+
+
+def test_scorer_matches_plain_sort_by(small_sample):
+    scorer = scorer_for(small_sample)
+    for keys in ORDERS:
+        assert scorer(keys) == S._encoded_size(small_sample, keys, "zstd"), keys
+    assert scorer([]) == S._encoded_size(small_sample, [], "zstd")
+
+
+def test_scorer_without_ranks_is_the_plain_path(small_sample):
+    plain = scorer_for(small_sample, use_ranks=False)
+    ranked = scorer_for(small_sample)
+    assert [plain(k) for k in ORDERS] == [ranked(k) for k in ORDERS]
+
+
+def test_prefetch_threads_give_same_sizes(small_sample):
+    orders = ORDERS + [["store", "item"], ["day"], ["item"]]  # one duplicate
+    serial, parallel = scorer_for(small_sample, threads=1), scorer_for(small_sample, threads=4)
+    serial.prefetch(orders)
+    parallel.prefetch(orders)
+    assert serial.cache == parallel.cache
+    assert serial.tried == parallel.tried == len({tuple(o) for o in orders})
+
+
+def test_prefetch_computes_each_order_once(small_sample, monkeypatch):
+    calls = []
+    real = S._encoded_size
+
+    def counting(table, keys, compression, ranks=None):
+        calls.append(tuple(keys))
+        return real(table, keys, compression, ranks)
+
+    monkeypatch.setattr(S, "_encoded_size", counting)
+    scorer = scorer_for(small_sample, threads=3)
+    a, b = ["store", "item"], ["day"]
+    scorer.prefetch([a, b, a])
+    scorer(a)  # already cached: no new computation
+    assert sorted(calls) == [("day",), ("store", "item")]
+
+
+def test_prefetch_propagates_worker_errors(small_sample):
+    before = threading.active_count()
+    scorer = scorer_for(small_sample, threads=4, compression="no-such-codec")
+    with pytest.raises(Exception):
+        scorer.prefetch(ORDERS)
+    assert scorer.tried == 0  # nothing half-cached
+    assert threading.active_count() == before  # the pool was shut down
