@@ -345,3 +345,30 @@ def test_progress_reports_thread_count(sales):
     messages = []
     run(sales, threads=2, progress=messages.append)
     assert any("2 thread" in m for m in messages)
+
+
+# --- CLI: --threads -------------------------------------------------------
+
+
+def suggest_cli(sales, *extra):
+    return main(["suggest-sort", str(sales), "--sample-rows", "15000", "--color", "never", *extra])
+
+
+def test_cli_threads_option_runs(sales, capsys):
+    assert suggest_cli(sales, "--threads", "2") == 0
+    assert "2 thread" in capsys.readouterr().err
+
+
+def test_cli_threads_one_equals_three(sales, capsys):
+    assert suggest_cli(sales, "--threads", "1") == 0
+    serial = capsys.readouterr().out
+    assert suggest_cli(sales, "--threads", "3") == 0
+    assert capsys.readouterr().out == serial
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_cli_rejects_non_positive_threads(sales, capsys, value):
+    with pytest.raises(SystemExit) as exc:
+        suggest_cli(sales, "--threads", value)
+    assert exc.value.code == 2
+    assert "--threads must be at least 1" in capsys.readouterr().err

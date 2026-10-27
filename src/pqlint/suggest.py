@@ -457,8 +457,15 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--max-keys", type=int, default=6, metavar="N", help="longest order to build")
     parser.add_argument("--seed", type=int, default=0, help="sampling seed (default 0)")
+    parser.add_argument(
+        "--threads", type=int, metavar="N",
+        help="parallel trials (default: automatic, at most 8 and limited by free memory; "
+        "1 = serial)",
+    )
     parser.add_argument("--color", choices=["auto", "always", "never"], default="auto")
     args = parser.parse_args(argv)
+    if args.threads is not None and args.threads < 1:
+        parser.error("--threads must be at least 1")
     st = render.Style(render.use_color(args.color))
     start = [c.strip() for c in args.start_with.split(",") if c.strip()] if args.start_with else None
 
@@ -468,7 +475,7 @@ def main(argv: list[str]) -> int:
     try:
         s = suggest(
             args.inputs, args.sample_rows, args.compression, start, args.max_keys,
-            seed=args.seed, progress=progress,
+            seed=args.seed, threads=args.threads, progress=progress,
         )
     except SuggestError as exc:
         print(f"{st('pqlint suggest-sort:', 'red', 'bold')} {exc}", file=sys.stderr)
