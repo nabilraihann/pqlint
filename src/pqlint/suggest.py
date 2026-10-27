@@ -88,7 +88,9 @@ def _probe(files: list[pq.ParquetFile]) -> pa.Table:
     if len(spots) > PROBE_ROW_GROUPS:
         step = (len(spots) - 1) / (PROBE_ROW_GROUPS - 1)
         spots = [spots[round(i * step)] for i in range(PROBE_ROW_GROUPS)]
-    return pa.concat_tables([f.read_row_group(g) for f, g in spots])
+    # Dictionary columns carry one dictionary per row group or file (daily pandas
+    # exports); group_by needs a single one.
+    return pa.concat_tables([f.read_row_group(g) for f, g in spots]).unify_dictionaries()
 
 
 def _candidates(schema: pa.Schema, probe: pa.Table, start: list[str]):
@@ -171,7 +173,7 @@ def _check_compression(codec: str) -> None:
     """Fail early and cleanly on a codec this pyarrow cannot write."""
     try:
         pq.write_table(pa.table({"x": [0]}), pa.BufferOutputStream(), compression=codec)
-    except (ValueError, pa.ArrowException) as exc:
+    except (ValueError, OSError, pa.ArrowException) as exc:  # OSError: e.g. lzo
         raise SuggestError(f"unsupported compression codec {codec!r}") from exc
 
 

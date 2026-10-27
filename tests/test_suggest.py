@@ -372,3 +372,63 @@ def test_cli_rejects_non_positive_threads(sales, capsys, value):
         suggest_cli(sales, "--threads", value)
     assert exc.value.code == 2
     assert "--threads must be at least 1" in capsys.readouterr().err
+
+
+# --- review fixes: differing dictionaries, more codec errors -----------------
+
+
+def per_batch_dictionary_table(stores, seed):
+    """Rows over `stores` where store and store_name group alike, each dictionary-encoded on its own."""
+    rnd = random.Random(seed)
+    rows = [(s, f"Name {s}", i, d) for s in stores for i in range(4) for d in range(1, 7)]
+    rnd.shuffle(rows)
+    st, name, item, day = zip(*rows)
+    return pa.table(
+        {
+            "store": pa.array(st).dictionary_encode(),
+            "store_name": pa.array(name).dictionary_encode(),
+            "item": list(item),
+            "day": list(day),
+        }
+    )
+
+
+def test_suggest_with_different_dictionaries_per_file(tmp_path):
+    # Daily pandas exports: every file's category columns carry a different dictionary.
+    for n, lo in enumerate((0, 10, 20)):
+        stores = [f"S{k:02d}" for k in range(lo, lo + 20)]
+        pq.write_table(per_batch_dictionary_table(stores, n), tmp_path / f"day{n}.parquet")
+    s = S.suggest([str(tmp_path)], sample_rows=100_000)
+    assert s.skipped["store_name"].startswith("same grouping as 'store'")
+    assert s.best.keys
+
+
+def test_suggest_with_different_dictionaries_per_row_group(tmp_path):
+    path = tmp_path / "batches.parquet"
+    stores = [f"S{k:02d}" for k in range(30)]
+    first = per_batch_dictionary_table(stores[:15], 1)
+    with pq.ParquetWriter(path, first.schema) as writer:
+        writer.write_table(first)
+        writer.write_table(per_batch_dictionary_table(stores[10:], 2))
+    s = S.suggest([str(path)], sample_rows=100_000)
+    assert s.skipped["store_name"].startswith("same grouping as 'store'")
+
+
+def can_write_with(codec):
+    try:
+        pq.write_table(pa.table({"x": [0]}), pa.BufferOutputStream(), compression=codec)
+    except Exception:
+        return False
+    return True
+
+
+@pytest.mark.skipif(can_write_with("lzo"), reason="this pyarrow can write lzo")
+def test_codec_that_raises_oserror_is_a_clean_error(sales):
+    with pytest.raises(S.SuggestError, match="lzo"):
+        run(sales, compression="lzo")
+
+
+@pytest.mark.skipif(can_write_with("lzo"), reason="this pyarrow can write lzo")
+def test_cli_unsupported_codec_exits_2(sales, capsys):
+    assert suggest_cli(sales, "--compression", "lzo") == 2
+    assert "unsupported compression codec 'lzo'" in capsys.readouterr().err
