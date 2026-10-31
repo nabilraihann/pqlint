@@ -90,7 +90,11 @@ class Plan:
         return self.available_bytes is None or self.est_peak_bytes <= self.available_bytes
 
 
-def available_memory() -> int | None:
+CGROUP_ROOT = Path("/sys/fs/cgroup")  # inside a container this is the container's own cgroup
+_NO_LIMIT = 2**60  # cgroup v1 reports "unlimited" as a huge number
+
+
+def _meminfo_available() -> int | None:
     """MemAvailable from /proc/meminfo; None where it cannot be determined."""
     try:
         with open("/proc/meminfo") as f:
@@ -100,6 +104,59 @@ def available_memory() -> int | None:
     except (OSError, ValueError, IndexError):
         pass
     return None
+
+
+def _read_int(path: Path) -> int | None:
+    """A non-negative integer from a one-line file; None for "max", "-1", junk or a missing file."""
+    try:
+        text = path.read_text().strip()
+    except OSError:
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def _cgroup_memory_left() -> int | None:
+    """What a container's memory limit still allows (cgroup v2, then v1); None if unlimited."""
+    for limit_file, usage_file in (
+        ("memory.max", "memory.current"),
+        ("memory/memory.limit_in_bytes", "memory/memory.usage_in_bytes"),
+    ):
+        limit = _read_int(CGROUP_ROOT / limit_file)
+        if limit is not None and limit < _NO_LIMIT:
+            return max(0, limit - (_read_int(CGROUP_ROOT / usage_file) or 0))
+    return None
+
+
+def available_memory() -> int | None:
+    """Memory this process can still use: the smaller of the host's MemAvailable and the
+    container limit. None where neither can be determined."""
+    known = [m for m in (_meminfo_available(), _cgroup_memory_left()) if m is not None]
+    return min(known) if known else None
+
+
+def _cgroup_cpu_quota() -> int | None:
+    """CPUs a container's quota allows, rounded up (cgroup v2, then v1); None if unlimited."""
+    quota = period = None
+    try:
+        quota, period = (CGROUP_ROOT / "cpu.max").read_text().split()[:2]
+    except (OSError, ValueError):
+        quota = _read_int(CGROUP_ROOT / "cpu/cpu.cfs_quota_us")
+        period = _read_int(CGROUP_ROOT / "cpu/cpu.cfs_period_us")
+    try:
+        quota, period = int(quota), int(period)
+    except (TypeError, ValueError):  # "max", missing or junk
+        return None
+    return max(1, -(-quota // period)) if quota > 0 and period > 0 else None
+
+
+def available_cpus() -> int:
+    """CPUs this process may run on: its affinity, capped by a container's CPU quota."""
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:  # not available on every platform
+        cpus = os.cpu_count() or 1
+    quota = _cgroup_cpu_quota()
+    return max(1, min(cpus, quota) if quota else cpus)
 
 
 def parse_size(text: str) -> int:

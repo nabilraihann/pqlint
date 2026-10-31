@@ -27,7 +27,6 @@ and settled on item,store (15.3 MiB real) instead of dc,store,item,day
 from __future__ import annotations
 
 import argparse
-import os
 import random
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -39,7 +38,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from . import render
-from .compact import _count_values, available_memory
+from .compact import _count_values, available_cpus, available_memory
 from .reader import expand_paths
 
 PROBE_ROW_GROUPS = 40  # spread row groups read to estimate cardinalities
@@ -161,7 +160,7 @@ def resolve_threads(
     """
     if requested is not None:
         return max(1, requested)
-    cpus = cpus or os.cpu_count() or 1
+    cpus = cpus or available_cpus()
     if available is None:
         cap = 4
     else:
@@ -183,15 +182,18 @@ def _rank_table(table: pa.Table, columns: list[str]) -> pa.Table:
     Ranking each column once makes every later sort an integer sort. Dictionary
     columns are decoded first (neither rank nor sort_by handles them); a column
     whose rank is not implemented stays as its plain values, which sort_indices
-    can still order.
+    can still order. Ranks are 32-bit (a dense rank never exceeds the row count),
+    which halves the table and sorts a little faster.
     """
+    small = table.num_rows < 2**32
     out = {}
     for name in columns:
         col = table[name]
         if pa.types.is_dictionary(col.type):
             col = col.cast(col.type.value_type)
         try:
-            out[name] = pc.rank(col, sort_keys="ascending", tiebreaker="dense")
+            ranked = pc.rank(col, sort_keys="ascending", tiebreaker="dense")
+            out[name] = ranked.cast(pa.uint32()) if small else ranked
         except (pa.ArrowNotImplementedError, pa.ArrowInvalid):
             out[name] = col
     return pa.table(out)
@@ -305,11 +307,15 @@ def suggest(
     sample = _entity_sample(inputs, entity, fraction, seed)
     scale = rows / max(sample.num_rows, 1)
 
-    threads = resolve_threads(threads, sample.nbytes, available_memory())
+    rank_columns = list(dict.fromkeys(candidates + start))
+    free = available_memory()
+    if free is not None:  # the table of ranks (4 bytes per row and column) is shared, not per thread
+        free = max(0, free - 4 * sample.num_rows * len(rank_columns))
+    threads = resolve_threads(threads, sample.nbytes, free)
     if progress:
         progress(f"searching with {threads} thread(s)")
     # A smaller search subsample biased the ranking; see the module docstring.
-    scorer = _Scorer(sample, list(dict.fromkeys(candidates + start)), compression, threads)
+    scorer = _Scorer(sample, rank_columns, compression, threads)
     score = scorer
 
     # Whole orders are compared, not prefixes: the best order (coarse to fine,

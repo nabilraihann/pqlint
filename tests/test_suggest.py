@@ -177,6 +177,28 @@ def test_rank_order_equals_sort_indices_for_every_type(typed_table):
         assert S._order(ranks, keys).equals(reference_order(typed_table, keys)), keys
 
 
+def test_rank_order_equals_sort_indices_on_chunked_columns(typed_table):
+    # Real tables are chunked (one chunk per row group/batch); the dictionary column gets
+    # a different dictionary in every chunk, as in daily pandas exports.
+    parts = [typed_table.slice(0, 170), typed_table.slice(170, 40), typed_table.slice(210)]
+    parts = [
+        p.set_column(p.schema.get_field_index("g"), "g", p["g"].combine_chunks().dictionary_encode())
+        for p in parts
+    ]
+    chunked = pa.concat_tables(parts)
+    assert chunked["i"].num_chunks == 3
+    cols = chunked.column_names
+    ranks = S._rank_table(chunked, cols)
+    for keys in (["g", "i"], ["dec", "ls", "s"], ["b"], ["d", "ts"]):
+        assert S._order(ranks, keys).equals(reference_order(chunked, keys)), keys
+
+
+def test_ranks_are_32_bit(typed_table):
+    # Dense ranks never exceed the row count, so 32 bits halve the table of ranks.
+    ranks = S._rank_table(typed_table, ["i", "s", "d", "g"])
+    assert {str(f.type) for f in ranks.schema} == {"uint32"}
+
+
 def test_nulls_sort_last(typed_table):
     order = S._order(S._rank_table(typed_table, ["s"]), ["s"])
     values = typed_table["s"].take(order).to_pylist()
@@ -269,6 +291,41 @@ def test_prefetch_computes_each_order_once(small_sample, monkeypatch):
     assert sorted(calls) == [("day",), ("store", "item")]
 
 
+def test_prefetch_really_runs_trials_at_the_same_time(small_sample, monkeypatch):
+    # Both trials wait for each other: the barrier is only passed if two run at once.
+    barrier = threading.Barrier(2, timeout=10)
+    real = S._encoded_size
+
+    def meeting(table, keys, compression, ranks=None):
+        barrier.wait()
+        return real(table, keys, compression, ranks)
+
+    monkeypatch.setattr(S, "_encoded_size", meeting)
+    scorer = scorer_for(small_sample, threads=2)
+    scorer.prefetch([["store", "item"], ["day"]])
+    assert scorer.tried == 2
+
+
+def test_prefetch_with_one_thread_is_not_concurrent(small_sample, monkeypatch):
+    running, peak, lock = 0, 0, threading.Lock()
+    real = S._encoded_size
+
+    def watching(table, keys, compression, ranks=None):
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        try:
+            return real(table, keys, compression, ranks)
+        finally:
+            with lock:
+                running -= 1
+
+    monkeypatch.setattr(S, "_encoded_size", watching)
+    scorer_for(small_sample, threads=1).prefetch(ORDERS)
+    assert peak == 1
+
+
 def test_prefetch_propagates_worker_errors(small_sample):
     before = threading.active_count()
     scorer = scorer_for(small_sample, threads=4, compression="no-such-codec")
@@ -339,6 +396,36 @@ def test_three_row_input_is_a_clean_error(write):
 def test_bad_compression_is_a_clean_error(sales):
     with pytest.raises(S.SuggestError, match="no-such-codec"):
         run(sales, compression="no-such-codec")
+
+
+def test_thread_budget_counts_the_table_of_ranks(sales, monkeypatch):
+    free = 10 * 1024**3
+    seen = {}
+    monkeypatch.setattr(S, "available_memory", lambda: free)
+    real = S.resolve_threads
+
+    def spy(requested, sample_bytes, available, cpus=None):
+        seen["available"] = available
+        return real(requested, sample_bytes, available, cpus)
+
+    monkeypatch.setattr(S, "resolve_threads", spy)
+    run(sales, sample_rows=10**9)  # the whole file is the sample: 48,000 rows
+    taken = free - seen["available"]
+    assert taken > 0 and taken % (4 * 48_000) == 0  # 4 bytes per rank, per row, per column
+
+
+def test_thread_budget_with_unknown_memory_stays_unknown(sales, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(S, "available_memory", lambda: None)
+    real = S.resolve_threads
+
+    def spy(requested, sample_bytes, available, cpus=None):
+        seen["available"] = available
+        return real(requested, sample_bytes, available, cpus)
+
+    monkeypatch.setattr(S, "resolve_threads", spy)
+    run(sales)
+    assert seen["available"] is None
 
 
 def test_progress_reports_thread_count(sales):
