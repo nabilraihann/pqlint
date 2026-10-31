@@ -202,3 +202,54 @@ def test_limit_below_fixed_overhead_says_so(src, tmp_path, monkeypatch, capsys):
 def test_plan_labels_a_given_limit(src, capsys):
     main(["compact", str(src), "-o", "x.parquet", "--sort-by", "k", "--memory-limit", "1G", "--dry-run"])
     assert "1.00 GiB limit" in capsys.readouterr().out
+
+
+# --- dictionary-typed columns (e.g. pandas category) ---------------------------------
+
+
+def dict_table(seed, n=N):
+    rnd = random.Random(seed)
+    g = [rnd.choice(["n", "s", "e", "w", "c", "x", "y", None]) for _ in range(n)]
+    k = list(range(n))
+    rnd.shuffle(k)
+    return pa.table({"g": pa.array(g, pa.string()).dictionary_encode(), "k": k})
+
+
+def plain(table):
+    return table.set_column(0, "g", table["g"].cast(pa.string()))
+
+
+@pytest.mark.parametrize("keys", [[("g", "ascending"), ("k", "descending")], [("g", "descending")]])
+def test_sort_by_dictionary_column_in_memory(write, tmp_path, keys):
+    src = write(dict_table(1), "d.parquet", row_group_size=100)
+    out = tmp_path / "out.parquet"
+    assert compact_with(src, out, keys, 10**9) == 0
+    got = pq.read_table(out)
+    assert pa.types.is_dictionary(got.schema.field("g").type)
+    assert plain(got).equals(plain(pq.read_table(src)).sort_by(keys))
+
+
+@pytest.mark.parametrize("keys", [[("g", "ascending"), ("k", "descending")], [("g", "descending")]])
+def test_sort_by_dictionary_column_bucketed(write, tmp_path, keys):
+    src = write(dict_table(1), "d.parquet", row_group_size=100)
+    limit = limit_for(src, keys, 0.95)
+    plan = C.make_plan([str(src)], keys, memory_limit=limit)
+    assert plan.strategy == C.BUCKETED and len(plan.bucket_rows) > 1
+    out = tmp_path / "out.parquet"
+    assert compact_with(src, out, keys, limit) == 0
+    got = pq.read_table(out)
+    assert pa.types.is_dictionary(got.schema.field("g").type)
+    assert plain(got).equals(plain(pq.read_table(src)).sort_by(keys))
+
+
+def test_dictionary_sort_across_files_with_different_dictionaries(write, tmp_path):
+    a = write(dict_table(1, 600), "a.parquet", row_group_size=100)
+    # Same values, different first-seen order -> different dictionary per file.
+    t = dict_table(2, 600)
+    b = write(t.take(pa.array(range(599, -1, -1))), "b.parquet", row_group_size=100)
+    keys = [("g", "ascending"), ("k", "ascending")]
+    out = tmp_path / "out.parquet"
+    rc = main(["compact", str(a), str(b), "-o", str(out), "--sort-by", "g,k"])
+    assert rc == 0
+    both = pa.concat_tables([plain(pq.read_table(a)), plain(pq.read_table(b))])
+    assert plain(pq.read_table(out)).equals(both.sort_by(keys))

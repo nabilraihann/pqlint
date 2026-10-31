@@ -132,6 +132,25 @@ def _sample_arrow_bytes_per_row(files: list[pq.ParquetFile]) -> float:
     return total / rows if rows else 0.0
 
 
+def _sort_table(table: pa.Table, sort_keys) -> pa.Table:
+    """Table.sort_by (stable, nulls last), also for dictionary-typed key columns.
+
+    Arrow cannot sort dictionary arrays, so the order is computed on decoded copies of
+    the key columns and applied to the original table, which keeps its column types.
+    """
+    if not any(pa.types.is_dictionary(table.schema.field(n).type) for n, _ in sort_keys):
+        return table.sort_by(sort_keys)
+    keys = pa.table({n: _decoded(table[n]) for n, _ in sort_keys})
+    return table.take(pc.sort_indices(keys, sort_keys=sort_keys))
+
+
+def _decoded(column):
+    """The column with dictionary encoding removed (unchanged if it has none)."""
+    if pa.types.is_dictionary(column.type):
+        return column.cast(column.type.value_type)
+    return column
+
+
 def _count_values(inputs: list[Path], column: str, order: str):
     """Distinct non-null values of `column` in output order, their counts, and the null count.
 
@@ -143,7 +162,7 @@ def _count_values(inputs: list[Path], column: str, order: str):
     for path in inputs:
         for batch in pq.ParquetFile(path).iter_batches(columns=[column], batch_size=1 << 20):
             col = batch.column(0)
-            value_type = col.type
+            value_type = col.type.value_type if pa.types.is_dictionary(col.type) else col.type
             nulls += col.null_count
             for item in pc.value_counts(col).to_pylist():
                 if item["values"] is not None:
@@ -354,7 +373,7 @@ def _sorting_columns(plan: Plan):
 
 def _write_sorted(plan: Plan, tmp: Path, compression: str) -> None:
     table = pa.concat_tables([pq.ParquetFile(p).read() for p in plan.inputs])
-    table = table.sort_by(plan.sort_keys)  # nulls last
+    table = _sort_table(table, plan.sort_keys)  # nulls last
     pq.write_table(
         table,
         tmp,
@@ -407,7 +426,7 @@ def _write_bucketed(plan: Plan, tmp: Path, compression: str) -> None:
         ) as writer:
             out = _RowGroupWriter(writer, plan.row_group_rows)
             for i in sorted(writers):
-                table = pq.ParquetFile(paths[i]).read().sort_by(plan.sort_keys)
+                table = _sort_table(pq.ParquetFile(paths[i]).read(), plan.sort_keys)
                 paths[i].unlink()
                 out.add(table)
                 del table
