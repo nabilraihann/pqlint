@@ -104,6 +104,9 @@ uv run pqlint compact data/ -o merged.parquet --sort-by dc --dry-run   # plan on
   `--threads 1` and 56-76 s with `--threads 4` (run-to-run noise is about 10 s). The output is
   identical row for row either way. Most of the time is in the serial first pass and in
   writing, not in sorting.
+- `--compression-level N` sets the codec level of the output (zstd 9 shrank the 33.6M-row example from
+  49.2 to 42.4 MiB with no visible extra time; zstd's default is 1). The codec and level are checked
+  before anything runs, so an unsupported combination (e.g. snappy with a level) is a clean error.
 - The output is written to a temporary file, checked for row count and schema, then renamed.
   An existing output needs `--overwrite`, and the output may not be one of the inputs.
 - Other options: `--compression` (default `zstd`), `--row-group-rows`, `--memory-limit`.

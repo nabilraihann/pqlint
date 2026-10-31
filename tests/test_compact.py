@@ -177,7 +177,7 @@ def test_unknown_memory_does_not_block(src, tmp_path, monkeypatch):
 
 
 def test_failed_write_leaves_no_partial_output(src, tmp_path, monkeypatch):
-    def boom(plan, tmp, compression):
+    def boom(plan, tmp, compression, level=None):
         tmp.write_bytes(b"partial")
         raise RuntimeError("disk full")
 
@@ -192,8 +192,8 @@ def test_failed_write_leaves_no_partial_output(src, tmp_path, monkeypatch):
 def test_verification_catches_row_count_mismatch(src, tmp_path, monkeypatch, capsys):
     real = C._write_streaming
 
-    def drop_rows(plan, tmp, compression):
-        real(plan, tmp, compression)
+    def drop_rows(plan, tmp, compression, level=None):
+        real(plan, tmp, compression, level)
         pq.write_table(read(tmp).slice(0, 10), tmp)
 
     monkeypatch.setattr(C, "_write_streaming", drop_rows)

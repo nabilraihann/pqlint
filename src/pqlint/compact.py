@@ -401,11 +401,26 @@ class _RowGroupWriter:
             self.buffered, self.count = [], 0
 
 
+def check_compression(codec: str, level: int | None = None) -> None:
+    """Fail early and cleanly on a codec or level this pyarrow cannot write.
+
+    Level problems otherwise surface only after the first pass of a long run.
+    """
+    try:
+        pq.write_table(
+            pa.table({"x": [0]}), pa.BufferOutputStream(),
+            compression=codec, compression_level=level,
+        )
+    except (ValueError, OSError, pa.ArrowException) as exc:  # OSError: e.g. gzip level 99, lzo
+        what = f"codec {codec!r}" if level is None else f"codec {codec!r} with level {level}"
+        raise CompactError(f"cannot write with {what}: {exc}") from exc
+
+
 def _sorting_columns(plan: Plan):
     return pq.SortingColumn.from_ordering(plan.schema, plan.sort_keys, null_placement="at_end")
 
 
-def _write_sorted(plan: Plan, tmp: Path, compression: str) -> None:
+def _write_sorted(plan: Plan, tmp: Path, compression: str, level: int | None = None) -> None:
     # nulls last; no name for the loaded table, so _sort_table can release it column by column
     table = _sort_table(
         pa.concat_tables([pq.ParquetFile(p).read() for p in plan.inputs]), plan.sort_keys
@@ -415,12 +430,15 @@ def _write_sorted(plan: Plan, tmp: Path, compression: str) -> None:
         tmp,
         row_group_size=plan.row_group_rows,
         compression=compression,
+        compression_level=level,
         sorting_columns=_sorting_columns(plan),
     )
 
 
-def _write_streaming(plan: Plan, tmp: Path, compression: str) -> None:
-    with pq.ParquetWriter(tmp, plan.schema, compression=compression) as writer:
+def _write_streaming(plan: Plan, tmp: Path, compression: str, level: int | None = None) -> None:
+    with pq.ParquetWriter(
+        tmp, plan.schema, compression=compression, compression_level=level
+    ) as writer:
         out = _RowGroupWriter(writer, plan.row_group_rows)
         for path in plan.inputs:
             for batch in pq.ParquetFile(path).iter_batches(batch_size=BATCH_ROWS):
@@ -439,7 +457,7 @@ def _sort_bucket(path: Path, sort_keys) -> pa.Table:
     return _sort_table(_load_and_delete(path), sort_keys)  # no name holds the loaded table
 
 
-def _write_bucketed(plan: Plan, tmp: Path, compression: str) -> None:
+def _write_bucketed(plan: Plan, tmp: Path, compression: str, level: int | None = None) -> None:
     first = plan.sort_keys[0][0]
     workdir = tmp.with_name(tmp.name + ".buckets")
     workdir.mkdir()
@@ -469,7 +487,8 @@ def _write_bucketed(plan: Plan, tmp: Path, compression: str) -> None:
 
         # Pass 2: sort one bucket at a time and append it to the output.
         with pq.ParquetWriter(
-            tmp, plan.schema, compression=compression, sorting_columns=_sorting_columns(plan)
+            tmp, plan.schema, compression=compression, compression_level=level,
+            sorting_columns=_sorting_columns(plan),
         ) as writer:
             out = _RowGroupWriter(writer, plan.row_group_rows)
             order = sorted(writers)
@@ -498,8 +517,10 @@ def _write_bucketed(plan: Plan, tmp: Path, compression: str) -> None:
 
 
 def compact(plan: Plan, output: str | os.PathLike[str], compression: str = "zstd",
-            overwrite: bool = False, force: bool = False) -> Path:
+            overwrite: bool = False, force: bool = False,
+            compression_level: int | None = None) -> Path:
     """Write the plan to `output`. Input files are never modified."""
+    check_compression(compression, compression_level)
     out = Path(output)
     if out.resolve() in {p.resolve() for p in plan.inputs}:
         raise CompactError("output is also an input; refusing to overwrite source data")
@@ -527,7 +548,7 @@ def compact(plan: Plan, output: str | os.PathLike[str], compression: str = "zstd
     write = {STREAMING: _write_streaming, MEMORY: _write_sorted, BUCKETED: _write_bucketed}
     tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
     try:
-        write[plan.strategy](plan, tmp, compression)
+        write[plan.strategy](plan, tmp, compression, compression_level)
         written = pq.ParquetFile(tmp)
         if written.metadata.num_rows != plan.rows:
             raise CompactError(

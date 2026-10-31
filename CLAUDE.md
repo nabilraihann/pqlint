@@ -15,7 +15,7 @@ uv sync                                   # install dependensi (termasuk dev)
 uv run pytest -q                          # semua tes
 uv run pytest tests/test_rules.py::test_uncompressed   # satu tes
 uv run pqlint <file-atau-folder> [--json] [--summary-only] [--fail-under N]
-uv run pqlint compact <input...> -o <output> [--sort-by a,b:desc] [--memory-limit 2G] [--threads N] [--dry-run]
+uv run pqlint compact <input...> -o <output> [--sort-by a,b:desc] [--memory-limit 2G] [--threads N] [--compression-level N] [--dry-run]
 uv run pqlint suggest-sort <input...> [--start-with dc] [--sample-rows N]
 uv run python examples/make_demo_data.py demo   # data sintetis untuk docs/contoh-penggunaan.md
 ```
@@ -43,6 +43,7 @@ Alur: `cli` → `report.lint_path` → `reader.read_local` → `rules.lint`; set
 
 - Estimasi memori **tidak boleh dari footer**: `total_byte_size` adalah ukuran ter-encode; file contoh 245 MiB berukuran 0,34 GiB di footer tetapi ~4,7 GiB sebagai Arrow (string dictionary). `_sample_arrow_bytes_per_row` membaca sampel row group. Faktor puncak: sort 2,2x, streaming 3,5x (terukur ~3,3x). Bila sort penuh tidak muat, otomatis bucketed; streaming dan bucketed mengecilkan ukuran row group otomatis sesuai memori.
 - `Table.sort_by` pada kolom dictionary tidak didukung pyarrow (`ArrowNotImplementedError`). `compact._sort_table` mengurutkan lewat salinan kunci yang didekode lalu `take` ke tabel asli, sehingga tipe dictionary di output tetap. `_count_values` juga memakai tipe nilai (bukan dictionary) untuk `bucket_values`, karena `index_in` mendekode dictionary lebih dulu dan tipenya harus sama.
+- `--compression-level N` dikirim ke ketiga penulis output (`compact(..., compression_level=)`); file bucket sementara tetap zstd bawaan. `check_compression(codec, level)` menulis tabel kecil lebih dulu dan dipanggil sebelum `--dry-run` maupun run sebenarnya, karena level yang salah (snappy dengan level → `ArrowInvalid`, gzip 99 → `OSError`) kalau tidak baru gagal setelah pass 1; zstd di luar rentang diklem pyarrow tanpa galat. Terukur pada file contoh dengan `--sort-by dc,store`: level bawaan 49,2 MiB, zstd 9 42,4 MiB (−14%), waktu tidak berbeda nyata. Tiruan penulis di tes (`_write_streaming` dll.) harus menerima argumen `level`.
 - Penulisan lewat file sementara `.<nama>.<pid>.tmp` + verifikasi baris/skema + `os.replace`; tidak pernah menimpa input.
 - Verifikasi bawaan hanya jumlah baris dan skema. Pada file nyata 33,6 juta baris isinya juga dibandingkan penuh secara streaming (identik).
 

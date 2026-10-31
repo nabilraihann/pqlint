@@ -418,3 +418,68 @@ def test_default_is_one_bucket_at_a_time(src):
     plan = C.make_plan([str(src)], keys, memory_limit=limit_for(src, keys, 0.5))
     assert plan.workers == 1
     assert "in parallel" not in dict(C.plan_rows(plan))["Sort"]
+
+
+# --- --compression-level --------------------------------------------------------------
+
+
+@pytest.fixture
+def texty(write):
+    rnd = random.Random(5)
+    words = [f"w{rnd.randrange(10_000):04d}" for _ in range(400)]
+    n = 40_000
+    t = pa.table({
+        "k": list(range(n)),
+        "t": [" ".join(rnd.choice(words) for _ in range(8)) for _ in range(n)],
+    })
+    return write(t, "texty.parquet", row_group_size=10_000)
+
+
+def codec_of(path):
+    return pq.ParquetFile(path).metadata.row_group(0).column(0).compression
+
+
+def strategy_args(strategy, texty):
+    if strategy == "streaming":
+        return []
+    limit = 10**9 if strategy == "memory" else limit_for(texty, [("k", "ascending")], 0.33)
+    return ["--sort-by", "k", "--memory-limit", str(limit)]
+
+
+@pytest.mark.parametrize("strategy", ["streaming", "memory", "bucketed"])
+def test_compression_level_changes_the_output_size(texty, tmp_path, strategy):
+    extra = strategy_args(strategy, texty)
+    sizes = {}
+    for level in (1, 19):
+        out = tmp_path / f"out{level}.parquet"
+        assert main(["compact", str(texty), "-o", str(out), *extra,
+                     "--compression-level", str(level)]) == 0
+        assert codec_of(out) == "ZSTD"
+        sizes[level] = out.stat().st_size
+    assert sizes[19] < sizes[1]
+    assert pq.read_table(tmp_path / "out19.parquet").equals(pq.read_table(tmp_path / "out1.parquet"))
+
+
+def test_default_level_is_unchanged(texty, tmp_path):
+    a, b = tmp_path / "a.parquet", tmp_path / "b.parquet"
+    assert main(["compact", str(texty), "-o", str(a)]) == 0
+    assert main(["compact", str(texty), "-o", str(b), "--compression-level", "1"]) == 0
+    assert a.stat().st_size == b.stat().st_size  # pyarrow's zstd default is level 1
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--compression", "snappy", "--compression-level", "3"],  # snappy has no levels
+        ["--compression", "gzip", "--compression-level", "99"],   # out of range
+        ["--compression", "nope"],
+    ],
+)
+@pytest.mark.parametrize("dry", [[], ["--dry-run"]])
+def test_bad_codec_or_level_is_a_clean_error(texty, tmp_path, capsys, args, dry):
+    out = tmp_path / "o.parquet"
+    assert main(["compact", str(texty), "-o", str(out), *args, *dry]) == 2
+    err = capsys.readouterr().err
+    assert "pqlint compact:" in err and "Traceback" not in err
+    assert not out.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["texty.parquet"]
