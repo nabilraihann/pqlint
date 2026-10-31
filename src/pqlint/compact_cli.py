@@ -42,15 +42,24 @@ def main(argv: list[str]) -> int:
         "A sort that does not fit is split into buckets by the first sort column.",
     )
     parser.add_argument(
+        "--threads",
+        type=int,
+        metavar="N",
+        help="buckets to sort at once when the sort is split into buckets "
+        "(default: up to 8, fewer if memory is short)",
+    )
+    parser.add_argument(
         "--color", choices=["auto", "always", "never"], default="auto", help="colorize output"
     )
     args = parser.parse_args(argv)
+    if args.threads is not None and args.threads < 1:
+        parser.error("--threads must be at least 1")
     st = render.Style(render.use_color(args.color))
 
     try:
         sort_by = parse_sort(args.sort_by) if args.sort_by else None
         limit = parse_size(args.memory_limit) if args.memory_limit else None
-        plan = make_plan(args.inputs, sort_by, args.row_group_rows, limit)
+        plan = make_plan(args.inputs, sort_by, args.row_group_rows, limit, args.threads)
         print(render.heading(st, "Plan"))
         rows = plan_rows(plan)
         if not plan.fits_in_memory:

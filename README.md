@@ -94,8 +94,14 @@ uv run pqlint compact data/ -o merged.parquet --sort-by dc --dry-run   # plan on
   the first sort column cannot be split, so if a single value is too large the run is refused
   unless `--force`. The sort is declared in the footer (`sorting_columns`).
 
-  Example: a 33.6M-row file needing ~10.5 GiB to sort in memory was sorted by `dc,store` in 13
-  buckets on a machine with 3.7 GiB free (peak 2.2 GiB, 65 s), and shrank from 245 to 50 MiB.
+  Several buckets are sorted at once (`--threads N`, default up to 8): each bucket then gets
+  its share of the memory, so there are more, smaller buckets, and the number of buckets in
+  flight is lowered when memory is short. The result does not depend on `--threads`.
+
+  Example: a 33.6M-row file needing ~10.5 GiB to sort in memory was sorted by `dc,store` on a
+  machine with 3.6 GiB free and shrank from 245 to 49 MiB: 83 s with `--threads 1` (13 buckets,
+  peak 2.2 GiB), 52 s with the default (36 buckets, 4 at a time, peak 2.4 GiB). The output
+  is identical row for row.
 - The output is written to a temporary file, checked for row count and schema, then renamed.
   An existing output needs `--overwrite`, and the output may not be one of the inputs.
 - Other options: `--compression` (default `zstd`), `--row-group-rows`, `--memory-limit`.

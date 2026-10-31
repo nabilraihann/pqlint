@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +44,7 @@ BUCKET_MEMORY_SHARE = 0.6  # a bucket's sort may use at most this share of free 
 BUCKET_WRITER_FACTOR = 2.0  # output row group buffer next to a sorted bucket
 PROCESS_BASELINE = 200 * MiB  # interpreter, pyarrow, writers; a 4.3M-row bucket measured
 #                               2.63 GiB peak RSS against 2.1 GiB estimated before this
+MAX_WORKERS = 8  # default number of buckets sorted at once
 MAX_BUCKETS = 512  # pass 1 filters every batch once per bucket
 MAX_BUCKET_KEYS = 1_000_000  # distinct values of the first sort column we are willing to count
 BATCH_ROWS = 131_072
@@ -75,6 +78,7 @@ class Plan:
     null_rows: int = 0
     problem: str | None = None  # why the plan cannot run within memory, if it cannot
     memory_from_limit: bool = False  # available_bytes came from --memory-limit
+    workers: int = 1  # buckets sorted at once (bucketed only); each one gets 1/workers of the memory
 
     @property
     def output_row_groups(self) -> int:
@@ -175,8 +179,28 @@ def _count_values(inputs: list[Path], column: str, order: str):
     return ordered, [counts[v] for v in ordered.to_pylist()], nulls
 
 
-def _bucket(plan_args: dict, inputs: list[Path], sort_keys, avail: int, bpr: float, rg_rows: int):
-    """Fill the bucketed fields of a plan: group consecutive key values into buckets."""
+def _group(counts: list[int], max_rows: int) -> tuple[list[int], list[int]]:
+    """Group consecutive values into buckets of at most max_rows rows (a single value may exceed it)."""
+    index: list[int] = []
+    rows_per: list[int] = []
+    for n in counts:
+        if not rows_per or rows_per[-1] + n > max_rows:
+            rows_per.append(0)
+        rows_per[-1] += n
+        index.append(len(rows_per) - 1)
+    return index, rows_per
+
+
+def _bucket(
+    plan_args: dict, inputs: list[Path], sort_keys, avail: int, bpr: float, rg_rows: int,
+    threads: int,
+):
+    """Fill the bucketed fields of a plan: group consecutive key values into buckets.
+
+    With several workers, that many buckets are sorted at once, so each bucket gets
+    its share of the memory. If the buckets cannot be made small enough (one big
+    value), the number of workers is lowered until the sorts in flight fit.
+    """
     first, order = sort_keys[0]
     counted = _count_values(inputs, first, order)
     if counted is None:
@@ -187,24 +211,24 @@ def _bucket(plan_args: dict, inputs: list[Path], sort_keys, avail: int, bpr: flo
         return
     values, counts, nulls = counted
     overhead = rg_rows * bpr * BUCKET_WRITER_FACTOR + PROCESS_BASELINE
-    max_rows = max(1, int((BUCKET_MEMORY_SHARE * avail - overhead) / (bpr * SORT_PEAK_FACTOR)))
+    per_row = bpr * SORT_PEAK_FACTOR
 
-    index: list[int] = []
-    rows_per: list[int] = []
-    for n in counts:
-        if not rows_per or rows_per[-1] + n > max_rows:
-            rows_per.append(0)
-        rows_per[-1] += n
-        index.append(len(rows_per) - 1)
-
-    largest = max(rows_per + [nulls])
+    for workers in range(max(1, min(threads, len(counts) + 1)), 0, -1):
+        max_rows = max(1, int((BUCKET_MEMORY_SHARE * avail - overhead) / (per_row * workers)))
+        index, rows_per = _group(counts, max_rows)
+        largest = max(rows_per + [nulls])
+        in_flight = min(workers, len(rows_per) + (1 if nulls else 0))
+        if in_flight * largest * per_row + overhead <= avail and len(rows_per) <= MAX_BUCKETS:
+            break
+    # Falling out of the loop leaves workers == 1: the problems below are reported as before.
     plan_args.update(
         strategy=BUCKETED,
         bucket_values=values,
         bucket_index=pa.array(index, type=pa.int32()),
         bucket_rows=tuple(rows_per),
         null_rows=nulls,
-        est_peak_bytes=int(largest * bpr * SORT_PEAK_FACTOR + overhead),
+        workers=workers,
+        est_peak_bytes=int(in_flight * largest * per_row + overhead),
     )
     if overhead >= avail:
         plan_args["problem"] = (
@@ -235,6 +259,7 @@ def make_plan(
     sort_by: list[tuple[str, str]] | None = None,
     row_group_rows: int | None = None,
     memory_limit: int | None = None,
+    threads: int | None = None,
 ) -> Plan:
     inputs = list(expand_paths(paths))
     if not inputs:
@@ -303,7 +328,8 @@ def make_plan(
         memory_from_limit=memory_limit is not None,
     )
     if strategy == BUCKETED:
-        _bucket(args, inputs, sort_keys, avail, bpr, row_group_rows)
+        wanted = threads if threads is not None else min(os.cpu_count() or 1, MAX_WORKERS)
+        _bucket(args, inputs, sort_keys, avail, bpr, row_group_rows, max(1, wanted))
     return Plan(**args)
 
 
@@ -315,8 +341,9 @@ def plan_rows(plan: Plan) -> list[tuple[str, str]]:
     elif plan.strategy == BUCKETED:
         n = len(plan.bucket_rows) + (1 if plan.null_rows else 0)
         largest = max(plan.bucket_rows + (plan.null_rows,))
+        parallel = f", {min(plan.workers, n)} in parallel" if min(plan.workers, n) > 1 else ""
         sort = (
-            f"{keys} (bucketed by {plan.sort_keys[0][0]}: {n} bucket(s), "
+            f"{keys} (bucketed by {plan.sort_keys[0][0]}: {n} bucket(s){parallel}, "
             f"largest {largest:,} rows)"
         )
     else:
@@ -392,6 +419,13 @@ def _write_streaming(plan: Plan, tmp: Path, compression: str) -> None:
         out.flush()
 
 
+def _sort_bucket(path: Path, sort_keys) -> pa.Table:
+    """Load one bucket file, delete it, and return it sorted."""
+    table = pq.ParquetFile(path).read()
+    path.unlink()
+    return _sort_table(table, sort_keys)
+
+
 def _write_bucketed(plan: Plan, tmp: Path, compression: str) -> None:
     first = plan.sort_keys[0][0]
     workdir = tmp.with_name(tmp.name + ".buckets")
@@ -425,11 +459,26 @@ def _write_bucketed(plan: Plan, tmp: Path, compression: str) -> None:
             tmp, plan.schema, compression=compression, sorting_columns=_sorting_columns(plan)
         ) as writer:
             out = _RowGroupWriter(writer, plan.row_group_rows)
-            for i in sorted(writers):
-                table = _sort_table(pq.ParquetFile(paths[i]).read(), plan.sort_keys)
-                paths[i].unlink()
-                out.add(table)
-                del table
+            order = sorted(writers)
+            with ThreadPoolExecutor(max_workers=plan.workers) as pool:
+                # At most `workers` buckets are loaded at once: the next one is only
+                # submitted after the previous one has been written, and the results
+                # are written in bucket order whatever order they finish in.
+                def submit(i):
+                    return pool.submit(_sort_bucket, paths[i], plan.sort_keys)
+
+                pending = deque(submit(i) for i in order[: plan.workers])
+                later = iter(order[plan.workers :])
+                try:
+                    while pending:
+                        table = pending.popleft().result()
+                        out.add(table)
+                        del table
+                        if (nxt := next(later, None)) is not None:
+                            pending.append(submit(nxt))
+                finally:
+                    for future in pending:
+                        future.cancel()
             out.flush()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

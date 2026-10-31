@@ -253,3 +253,109 @@ def test_dictionary_sort_across_files_with_different_dictionaries(write, tmp_pat
     assert rc == 0
     both = pa.concat_tables([plain(pq.read_table(a)), plain(pq.read_table(b))])
     assert plain(pq.read_table(out)).equals(both.sort_by(keys))
+
+
+# --- sorting several buckets at once (--threads) -------------------------------------
+
+
+@pytest.mark.parametrize("threads", [1, 2, 4])
+@pytest.mark.parametrize(
+    "keys",
+    [[("k", "ascending")], [("g", "ascending"), ("k", "descending")]],
+)
+def test_parallel_buckets_equal_in_memory_sort(src, tmp_path, keys, threads):
+    limit = limit_for(src, keys, 0.5)
+    plan = C.make_plan([str(src)], keys, memory_limit=limit, threads=threads)
+    assert plan.strategy == C.BUCKETED and plan.fits_in_memory
+    assert len(plan.bucket_rows) > 1
+
+    out = tmp_path / "out.parquet"
+    assert compact_with(src, out, keys, limit, "--threads", str(threads)) == 0
+    assert pq.read_table(out).equals(pq.read_table(src).sort_by(keys))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.parquet", "src.parquet"]
+
+
+def test_workers_never_exceed_what_was_asked(src):
+    keys = [("k", "ascending")]
+    limit = limit_for(src, keys, 0.5)
+    assert C.make_plan([str(src)], keys, memory_limit=limit, threads=1).workers == 1
+    assert 1 <= C.make_plan([str(src)], keys, memory_limit=limit, threads=3).workers <= 3
+
+
+def test_workers_shrink_when_memory_is_tight(src):
+    # Eight values of g cannot be split, so only a few buckets can be in flight.
+    keys = [("g", "ascending")]
+    roomy = C.make_plan([str(src)], keys, memory_limit=limit_for(src, keys, 0.95), threads=4)
+    tight = C.make_plan([str(src)], keys, memory_limit=limit_for(src, keys, 0.3), threads=4)
+    assert roomy.workers == 4
+    assert tight.fits_in_memory and tight.workers < roomy.workers
+    # The estimate counts every bucket in flight, so it stays inside the limit.
+    assert tight.est_peak_bytes <= tight.available_bytes
+    assert roomy.est_peak_bytes <= roomy.available_bytes
+
+
+def test_more_workers_mean_smaller_buckets_within_the_limit(src):
+    keys = [("k", "ascending")]
+    limit = limit_for(src, keys, 0.5)
+    one = C.make_plan([str(src)], keys, memory_limit=limit, threads=1)
+    four = C.make_plan([str(src)], keys, memory_limit=limit, threads=4)
+    assert four.workers > 1
+    assert max(four.bucket_rows) <= max(one.bucket_rows)
+    assert len(four.bucket_rows) >= len(one.bucket_rows)
+    assert four.est_peak_bytes <= limit
+
+
+def test_plan_shows_parallel_buckets(src):
+    keys = [("k", "ascending")]
+    plan = C.make_plan([str(src)], keys, memory_limit=limit_for(src, keys, 0.5), threads=4)
+    text = dict(C.plan_rows(plan))["Sort"]
+    assert f"{plan.workers} in parallel" in text
+    one = C.make_plan([str(src)], keys, memory_limit=limit_for(src, keys, 0.5), threads=1)
+    assert "in parallel" not in dict(C.plan_rows(one))["Sort"]
+
+
+def test_buckets_are_written_in_order_even_if_they_finish_late(src, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    real = C._sort_table
+    first = threading.Event()
+
+    def slow_first(table, keys):
+        # The first bucket to start sorting is the slowest one.
+        if not first.is_set():
+            first.set()
+            time.sleep(0.3)
+        return real(table, keys)
+
+    monkeypatch.setattr(C, "_sort_table", slow_first)
+    keys = [("k", "ascending")]
+    limit = limit_for(src, keys, 0.5)
+    out = tmp_path / "out.parquet"
+    assert compact_with(src, out, keys, limit, "--threads", "4") == 0
+    assert pq.read_table(out).equals(pq.read_table(src).sort_by(keys))
+
+
+def test_failure_in_parallel_pass_two_cleans_up(src, tmp_path, monkeypatch):
+    calls = []
+    real = C._sort_table
+
+    def boom(table, keys):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("bad bucket")
+        return real(table, keys)
+
+    monkeypatch.setattr(C, "_sort_table", boom)
+    keys = [("k", "ascending")]
+    out = tmp_path / "out.parquet"
+    with pytest.raises(RuntimeError, match="bad bucket"):
+        compact_with(src, out, keys, limit_for(src, keys, 0.5), "--threads", "4")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["src.parquet"]
+
+
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_threads_must_be_positive(src, tmp_path, bad):
+    with pytest.raises(SystemExit) as exc:
+        main(["compact", str(src), "-o", str(tmp_path / "o.parquet"), "--threads", bad])
+    assert exc.value.code == 2
