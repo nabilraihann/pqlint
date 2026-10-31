@@ -94,7 +94,7 @@ uv run pqlint compact data/ -o merged.parquet --sort-by dc --dry-run   # plan on
   the first sort column cannot be split, so if a single value is too large the run is refused
   unless `--force`. The sort is declared in the footer (`sorting_columns`).
 
-  Several buckets are sorted at once (`--threads N`, default up to 8): each bucket then gets
+  Several buckets can be sorted at once (`--threads N`, default 1): each bucket then gets
   its share of the memory, so there are more, smaller buckets, and the number of buckets in
   flight is lowered when memory is short. The result does not depend on `--threads`.
 

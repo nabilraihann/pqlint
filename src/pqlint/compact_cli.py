@@ -46,7 +46,8 @@ def main(argv: list[str]) -> int:
         type=int,
         metavar="N",
         help="buckets to sort at once when the sort is split into buckets "
-        "(default: up to 8, fewer if memory is short)",
+        "(default: 1; fewer than asked if memory is short). No speed-up was reliably "
+        "measured on the test machine, so measure before raising it",
     )
     parser.add_argument(
         "--color", choices=["auto", "always", "never"], default="auto", help="colorize output"

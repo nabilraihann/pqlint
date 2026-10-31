@@ -411,3 +411,10 @@ def test_sort_result_unchanged_by_releasing_columns():
     t = wide_table(5000, 4)
     keys = [("key", "descending"), ("c0", "ascending")]
     assert C._sort_table(t, keys).equals(t.sort_by(keys))
+
+
+def test_default_is_one_bucket_at_a_time(src):
+    keys = [("k", "ascending")]
+    plan = C.make_plan([str(src)], keys, memory_limit=limit_for(src, keys, 0.5))
+    assert plan.workers == 1
+    assert "in parallel" not in dict(C.plan_rows(plan))["Sort"]

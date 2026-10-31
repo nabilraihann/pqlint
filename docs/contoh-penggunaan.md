@@ -372,7 +372,7 @@ memakai **sort per bucket**:
 1. hitung nilai kolom sort pertama (hanya kolom itu yang dibaca);
 2. kelompokkan nilai-nilai berurutan menjadi bucket yang muat di memori, lalu salin setiap
    baris ke file sementara bucket-nya;
-3. sort bucket (beberapa sekaligus, lihat `--threads`) dan sambungkan sesuai urutan bucket.
+3. sort bucket satu per satu (atau beberapa sekaligus dengan `--threads`) dan sambungkan sesuai urutan bucket.
 
 Hasilnya identik dengan sort penuh. Contoh pada file nyata 33,6 juta baris (245 MiB di disk,
 ±10,5 GiB untuk sort penuh) di mesin dengan memori bebas 3,6 GiB:
@@ -381,18 +381,19 @@ Hasilnya identik dengan sort penuh. Contoh pada file nyata 33,6 juta baris (245 
 Plan
   Input        1 file(s), 673 row groups, 245.0 MiB
   Rows         33,646,597
-  Output       ~10 row group(s) of 3,669,022 rows
-  Sort         dc asc, store asc (bucketed by dc: 36 bucket(s), 4 in parallel, largest 1,571,069 rows)
+  Output       ~9 row group(s) of 3,788,903 rows
+  Sort         dc asc, store asc (bucketed by dc: 13 bucket(s), largest 2,977,314 rows)
   Temp disk    ~245 MiB next to the output
-  Peak memory  ~3.2 GiB estimated, 3.6 GiB available
+  Peak memory  ~2.2 GiB estimated, 3.7 GiB available
 ```
 
-Beberapa bucket di-sort sekaligus; tiap bucket mendapat bagian dari memori, jadi bucketnya
-lebih banyak dan lebih kecil. Pada mesin ini hasilnya **tidak lebih cepat secara andal**:
-tiga putaran bergantian memakan 64-74 detik dengan `--threads 1` (13 bucket) dan 56-76 detik
-dengan `--threads 4` (selisih antar-run sekitar 10 detik). Memori puncak terukur sekitar
-2,4 GiB. Isi file hasilnya identik baris demi baris. `--threads N` mengatur jumlah bucket
-sekaligus (bawaan sampai 8); bila memori sempit jumlahnya otomatis diturunkan.
+Memori puncak terukur 2,3 GiB dan waktunya 64-74 detik (derau antar-run sekitar 10 detik).
+
+Beberapa bucket bisa di-sort sekaligus dengan `--threads N` (bawaan 1; bila memori sempit
+jumlahnya otomatis diturunkan). Tiap bucket lalu mendapat bagian dari memori, jadi bucketnya
+lebih banyak dan lebih kecil, misalnya `36 bucket(s), 4 in parallel`. Pada mesin ini hasilnya
+**tidak lebih cepat secara andal**: tiga putaran bergantian memakan 56-76 detik dengan
+`--threads 4`. Isi file hasilnya identik baris demi baris. Ukur dulu sebelum menaikkannya.
 
 Membatasi memori secara manual:
 

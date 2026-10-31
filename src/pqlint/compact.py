@@ -44,7 +44,6 @@ BUCKET_MEMORY_SHARE = 0.6  # a bucket's sort may use at most this share of free 
 BUCKET_WRITER_FACTOR = 2.0  # output row group buffer next to a sorted bucket
 PROCESS_BASELINE = 200 * MiB  # interpreter, pyarrow, writers; a 4.3M-row bucket measured
 #                               2.63 GiB peak RSS against 2.1 GiB estimated before this
-MAX_WORKERS = 8  # default number of buckets sorted at once
 MAX_BUCKETS = 512  # pass 1 filters every batch once per bucket
 MAX_BUCKET_KEYS = 1_000_000  # distinct values of the first sort column we are willing to count
 BATCH_ROWS = 131_072
@@ -337,8 +336,7 @@ def make_plan(
         memory_from_limit=memory_limit is not None,
     )
     if strategy == BUCKETED:
-        wanted = threads if threads is not None else min(os.cpu_count() or 1, MAX_WORKERS)
-        _bucket(args, inputs, sort_keys, avail, bpr, row_group_rows, max(1, wanted))
+        _bucket(args, inputs, sort_keys, avail, bpr, row_group_rows, max(1, threads or 1))
     return Plan(**args)
 
 
