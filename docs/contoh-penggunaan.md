@@ -324,6 +324,43 @@ uv run pqlint compact demo/sales.parquet -o out/sales_stream.parquet
 
 Peringatan `small-file` yang tersisa wajar: data contohnya memang kecil.
 
+### Biarkan pqlint memilih urutannya: `--sort-by auto`
+
+Tanpa tahu kolom mana yang harus diurutkan, tulis `auto`. `compact` menjalankan `suggest-sort`
+lebih dulu (membaca sampel, juga saat `--dry-run`), menampilkan pilihannya, lalu memakainya:
+
+```bash
+uv run pqlint compact demo/sales.parquet -o out/sales_auto.parquet --sort-by auto
+```
+
+```
+Auto sort
+  Order      item_code, kode_store
+  Estimated  412.82 KiB against 3.80 MiB unsorted
+  Chosen by  suggest-sort, from a sample of 720,000 of 720,000 rows
+Plan
+  ...
+  Sort         item_code asc, kode_store asc (in memory)
+Wrote out/sales_auto.parquet
+  Size        4.04 MiB  412.83 KiB
+```
+
+Estimasinya 412,82 KiB dan hasil nyatanya 412,83 KiB. Hal yang perlu diketahui:
+
+- `auto` harus berdiri sendiri; `--sort-by auto,store` ditolak. Untuk mengunci kolom di depan,
+  jalankan `suggest-sort --start-with` sendiri lalu salin sarannya ke `--sort-by`.
+- Urutannya selalu menaik. Kolom yang benar-benar bernama `auto` ditulis `auto:asc`.
+- Bila tidak ada urutan yang menguntungkan, `compact` berjalan tanpa sort (streaming) dan
+  mengatakannya. Bila `suggest-sort` gagal (misalnya tidak ada kolom yang layak), `compact`
+  berhenti dengan pesannya.
+- Pada file nyata 33,6 juta baris, `auto` memilih `category,dc,store,item_code_b2b`
+  (estimasi 12,9 MiB, hasil nyata 13,55 MiB dari 245 MiB). Memilih urutan memakan sekitar
+  30 detik, compaction sisanya (total sekitar 100 detik pada mesin ini).
+- Kolom pertama yang kardinalitasnya rendah (di sini `category`) bisa punya satu nilai yang
+  sangat besar. Sort per bucket tidak bisa memecah satu nilai, jadi bila nilai itu tidak muat di
+  memori (di sini 5,7 juta baris, sekitar 2,8 GiB), `compact` menolak dan menjelaskannya.
+  Beri memori lebih, atau pakai `--start-with` pada `suggest-sort` dengan kolom lain di depan.
+
 ### Menggabungkan banyak file kecil
 
 ```bash
@@ -435,7 +472,7 @@ uv run pqlint suggest-sort data.parquet
 #    ...atau kunci kolom filter utama di depan:
 uv run pqlint suggest-sort data.parquet --start-with dc
 
-# 3. lihat rencana compact
+# 3. lihat rencana compact (atau lewati langkah 2-4: --sort-by auto memilih urutannya sendiri)
 uv run pqlint compact data.parquet -o data_rapi.parquet --sort-by <saran> --dry-run
 
 # 4. jalankan

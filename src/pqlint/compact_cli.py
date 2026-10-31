@@ -1,14 +1,56 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import statistics
 import sys
 
+import pyarrow as pa
+
 from . import render
+from . import suggest as suggestions
 from .compact import (
     CompactError, check_compression, compact, make_plan, parse_size, parse_sort, plan_rows,
 )
 from .report import lint_path
+
+
+AUTO = "auto"
+
+
+def _auto_sort(args, st) -> list[tuple[str, str]] | None:
+    """`--sort-by auto`: let suggest-sort pick the order (ascending) and show what it chose.
+
+    Returns None when no order pays off, so the compaction runs unsorted.
+    """
+
+    def progress(msg: str) -> None:
+        print(st(f"… {msg}", "dim"), file=sys.stderr)
+
+    try:
+        s = suggestions.suggest(args.inputs, compression=args.compression, progress=progress)
+    except suggestions.SuggestError as exc:
+        raise CompactError(f"--sort-by auto: {exc}") from exc
+    # The allocator keeps the sample's memory after it is freed, and planning reads the
+    # free memory from the OS: give it back first (measured: ~0.8 of 1.5 GiB on the real file).
+    gc.collect()
+    pa.default_memory_pool().release_unused()
+    if s.steps:
+        rows = [
+            ("Order", ", ".join(s.best.keys)),
+            ("Estimated", f"{render.human_size(s.best.est_bytes)} against "
+                          f"{render.human_size(s.unsorted.est_bytes)} unsorted"),
+        ]
+    else:
+        rows = [
+            ("Order", "none"),
+            ("Why", "no sort order shrinks the sample noticeably; compacting without a sort"),
+        ]
+    rows.append(("Chosen by", f"suggest-sort, from a sample of {s.sample_rows:,} of {s.rows:,} rows"))
+    print(render.heading(st, "Auto sort"))
+    print("\n".join(render.kv(st, rows)))
+    print()
+    return [(k, "ascending") for k in s.best.keys] or None
 
 
 def main(argv: list[str]) -> int:
@@ -23,7 +65,9 @@ def main(argv: list[str]) -> int:
         "--sort-by",
         metavar="COLS",
         help="comma-separated columns, optionally with :desc, e.g. dc,store:desc. "
-        "Sorting happens in memory.",
+        "Use 'auto' alone to let suggest-sort choose the order for the smallest file "
+        "(it reads a sample first, also with --dry-run; a column really named auto is "
+        "written auto:asc).",
     )
     parser.add_argument(
         "--row-group-rows",
@@ -68,7 +112,16 @@ def main(argv: list[str]) -> int:
     st = render.Style(render.use_color(args.color))
 
     try:
-        sort_by = parse_sort(args.sort_by) if args.sort_by else None
+        items = [item.strip() for item in (args.sort_by or "").split(",")]
+        if AUTO in items and items != [AUTO]:
+            raise CompactError(
+                "--sort-by auto cannot be combined with column names; use it alone, or list the "
+                "columns yourself (pqlint suggest-sort --start-with COLS fixes leading keys)"
+            )
+        if items == [AUTO]:
+            sort_by = _auto_sort(args, st)
+        else:
+            sort_by = parse_sort(args.sort_by) if args.sort_by else None
         limit = parse_size(args.memory_limit) if args.memory_limit else None
         check_compression(args.compression, args.compression_level)
         plan = make_plan(args.inputs, sort_by, args.row_group_rows, limit, args.threads)

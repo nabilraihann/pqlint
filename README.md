@@ -81,10 +81,16 @@ uv run pqlint compact data/ -o merged.parquet --sort-by dc,store    # sort (in m
 uv run pqlint compact big.parquet -o out.parquet --sort-by dc,store --memory-limit 2G
 uv run pqlint compact in.parquet -o out.parquet --sort-by ts:desc --row-group-rows 1000000
 uv run pqlint compact data/ -o merged.parquet --sort-by dc --dry-run   # plan only
+uv run pqlint compact data.parquet -o out.parquet --sort-by auto       # suggest-sort picks the order
 ```
 
 - Without `--sort-by` batches are streamed, so memory stays near one row group, and the row
   group size shrinks automatically if free RAM is low.
+- `--sort-by auto` runs `suggest-sort` first (it reads a sample, also with `--dry-run`), shows the order it chose and its
+  estimated size, then compacts with it; the order is ascending, and `auto` cannot be mixed with column names (a column
+  really named `auto` is `auto:asc`). If no order pays off it compacts unsorted. On the 33.6M-row example it chose
+  `category,dc,store,item_code_b2b` (estimated 12.9 MiB, real 13.55 MiB from 245 MiB). A leading key with one huge value
+  (here 5.7M rows of one `category`) still needs that value to fit in memory, as with any bucketed sort.
 - With `--sort-by` (nulls last, `:desc` for descending) the peak memory is estimated from
   sampled row groups. If the whole sort fits in available RAM (or `--memory-limit`), it runs in
   memory. If not, it is **bucketed**: one pass counts the values of the first sort column, rows
