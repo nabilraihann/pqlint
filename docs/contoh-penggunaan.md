@@ -388,11 +388,11 @@ Plan
 ```
 
 Beberapa bucket di-sort sekaligus; tiap bucket mendapat bagian dari memori, jadi bucketnya
-lebih banyak dan lebih kecil. Waktunya 52 detik dengan memori puncak terukur 2,44 GiB
-(estimasi sengaja konservatif). Dengan `--threads 1` (satu bucket sekali jalan, 13 bucket)
-waktunya 83 detik pada mesin yang sama. Isi file hasilnya identik baris demi baris.
-`--threads N` mengatur jumlah bucket sekaligus (bawaan sampai 8); bila memori sempit
-jumlahnya otomatis diturunkan.
+lebih banyak dan lebih kecil. Pada mesin ini hasilnya **tidak lebih cepat secara andal**:
+tiga putaran bergantian memakan 64-74 detik dengan `--threads 1` (13 bucket) dan 56-76 detik
+dengan `--threads 4` (selisih antar-run sekitar 10 detik). Memori puncak terukur sekitar
+2,4 GiB. Isi file hasilnya identik baris demi baris. `--threads N` mengatur jumlah bucket
+sekaligus (bawaan sampai 8); bila memori sempit jumlahnya otomatis diturunkan.
 
 Membatasi memori secara manual:
 

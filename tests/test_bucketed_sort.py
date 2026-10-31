@@ -359,3 +359,55 @@ def test_threads_must_be_positive(src, tmp_path, bad):
     with pytest.raises(SystemExit) as exc:
         main(["compact", str(src), "-o", str(tmp_path / "o.parquet"), "--threads", bad])
     assert exc.value.code == 2
+
+
+# --- memory used by the sort itself ---------------------------------------------------
+
+
+def wide_table(rows=1_000_000, columns=10):
+    rnd = random.Random(3)
+    data = {"key": pa.array([rnd.randrange(1000) for _ in range(rows)], pa.int64())}
+    for i in range(columns - 1):
+        data[f"c{i}"] = pa.array(range(rows), pa.int64())
+    return pa.table(data)
+
+
+PEAK_SCRIPT = """
+import sys
+import pyarrow as pa
+sys.path.insert(0, sys.argv[1])
+from test_bucketed_sort import wide_table
+from pqlint import compact as C
+
+pool = pa.default_memory_pool()
+table = wide_table()
+size, table = table.nbytes, None
+before = pool.max_memory()
+# No name of ours holds the table, so the callee has the only reference.
+result = C._sort_table(wide_table(), [("key", "ascending")])
+print(size, before, pool.max_memory(), result.num_rows)
+"""
+
+
+def test_sort_does_not_hold_two_full_copies():
+    # Table.sort_by needs the table plus a full sorted copy (~2x). _sort_table sorts the key
+    # columns, then copies one column at a time while releasing the original: ~1 table plus
+    # one column. Measured in a fresh process because the pool's peak is process-wide.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    out = subprocess.run(
+        [sys.executable, "-c", PEAK_SCRIPT, str(Path(__file__).parent)],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    size, before, peak, rows = map(int, out)
+    assert rows == 1_000_000
+    assert peak > before  # the measurement did observe this sort
+    assert peak < 1.5 * size, f"peak was {peak / size:.2f}x the table"
+
+
+def test_sort_result_unchanged_by_releasing_columns():
+    t = wide_table(5000, 4)
+    keys = [("key", "descending"), ("c0", "ascending")]
+    assert C._sort_table(t, keys).equals(t.sort_by(keys))

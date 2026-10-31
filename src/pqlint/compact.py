@@ -37,7 +37,7 @@ MIN_AUTO_ROWS = 100_000
 MAX_AUTO_ROWS = 10_000_000
 MAX_ROW_GROUP_MEMORY = 1024 * MiB  # keep a single row group's Arrow footprint modest
 SAMPLE_ROW_GROUPS = 8
-SORT_PEAK_FACTOR = 2.2  # loaded table + sorted copy + indices
+SORT_PEAK_FACTOR = 2.2  # calibrated on whole runs (see CLAUDE.md), not on the sort step alone
 STREAM_PEAK_FACTOR = 3.5  # buffered batches + concatenation + slice; measured ~3.3
 STREAM_MEMORY_SHARE = 0.5  # auto row group size uses at most this share of free RAM
 BUCKET_MEMORY_SHARE = 0.6  # a bucket's sort may use at most this share of free RAM
@@ -137,15 +137,24 @@ def _sample_arrow_bytes_per_row(files: list[pq.ParquetFile]) -> float:
 
 
 def _sort_table(table: pa.Table, sort_keys) -> pa.Table:
-    """Table.sort_by (stable, nulls last), also for dictionary-typed key columns.
+    """Table.sort_by (stable, nulls last), using less memory and also for dictionary keys.
 
-    Arrow cannot sort dictionary arrays, so the order is computed on decoded copies of
-    the key columns and applied to the original table, which keeps its column types.
+    Sorts only the key columns to get the row order, then copies the other columns one
+    at a time and lets go of each original as soon as its copy exists. Peak memory is
+    about the table plus one column, where `sort_by` needs the table plus a full copy.
+    Arrow cannot sort dictionary arrays, so those keys are decoded for the sort and the
+    original columns (and their types) are what get reordered.
+
+    Takes over `table`: pass it without keeping a reference, or the originals stay alive.
     """
-    if not any(pa.types.is_dictionary(table.schema.field(n).type) for n, _ in sort_keys):
-        return table.sort_by(sort_keys)
     keys = pa.table({n: _decoded(table[n]) for n, _ in sort_keys})
-    return table.take(pc.sort_indices(keys, sort_keys=sort_keys))
+    indices = pc.sort_indices(keys, sort_keys=sort_keys)
+    del keys
+    schema, columns = table.schema, []  # the schema keeps its metadata (e.g. pandas)
+    for name in schema.names:
+        columns.append(table[name].take(indices))
+        table = table.drop_columns([name])
+    return pa.Table.from_arrays(columns, schema=schema)
 
 
 def _decoded(column):
@@ -399,8 +408,10 @@ def _sorting_columns(plan: Plan):
 
 
 def _write_sorted(plan: Plan, tmp: Path, compression: str) -> None:
-    table = pa.concat_tables([pq.ParquetFile(p).read() for p in plan.inputs])
-    table = _sort_table(table, plan.sort_keys)  # nulls last
+    # nulls last; no name for the loaded table, so _sort_table can release it column by column
+    table = _sort_table(
+        pa.concat_tables([pq.ParquetFile(p).read() for p in plan.inputs]), plan.sort_keys
+    )
     pq.write_table(
         table,
         tmp,
@@ -419,11 +430,15 @@ def _write_streaming(plan: Plan, tmp: Path, compression: str) -> None:
         out.flush()
 
 
-def _sort_bucket(path: Path, sort_keys) -> pa.Table:
-    """Load one bucket file, delete it, and return it sorted."""
+def _load_and_delete(path: Path) -> pa.Table:
     table = pq.ParquetFile(path).read()
     path.unlink()
-    return _sort_table(table, sort_keys)
+    return table
+
+
+def _sort_bucket(path: Path, sort_keys) -> pa.Table:
+    """Load one bucket file, delete it, and return it sorted."""
+    return _sort_table(_load_and_delete(path), sort_keys)  # no name holds the loaded table
 
 
 def _write_bucketed(plan: Plan, tmp: Path, compression: str) -> None:

@@ -99,9 +99,11 @@ uv run pqlint compact data/ -o merged.parquet --sort-by dc --dry-run   # plan on
   flight is lowered when memory is short. The result does not depend on `--threads`.
 
   Example: a 33.6M-row file needing ~10.5 GiB to sort in memory was sorted by `dc,store` on a
-  machine with 3.6 GiB free and shrank from 245 to 49 MiB: 83 s with `--threads 1` (13 buckets,
-  peak 2.2 GiB), 52 s with the default (36 buckets, 4 at a time, peak 2.4 GiB). The output
-  is identical row for row.
+  machine with 3.6 GiB free and shrank from 245 to 49 MiB (peak RSS 2.3 GiB). Sorting buckets
+  in parallel gave **no reliable speed-up there**: three alternating runs took 64-74 s with
+  `--threads 1` and 56-76 s with `--threads 4` (run-to-run noise is about 10 s). The output is
+  identical row for row either way. Most of the time is in the serial first pass and in
+  writing, not in sorting.
 - The output is written to a temporary file, checked for row count and schema, then renamed.
   An existing output needs `--overwrite`, and the output may not be one of the inputs.
 - Other options: `--compression` (default `zstd`), `--row-group-rows`, `--memory-limit`.
